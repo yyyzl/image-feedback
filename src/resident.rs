@@ -1,6 +1,7 @@
 //! Event-driven tray process. This branch never creates a Slint window or loads user pictures.
 use std::{
     error::Error,
+    path::PathBuf,
     process::{Child, Command},
 };
 use tray_icon::{
@@ -24,13 +25,24 @@ struct Resident {
     quit: Option<MenuId>,
     child: Option<Child>,
     open_initially: bool,
+    smoke_output: Option<PathBuf>,
     error: Option<String>,
 }
-fn icon() -> Result<Icon, Box<dyn Error>> {
+const TEMPLATE_ICON: bool = cfg!(target_os = "macos");
+fn icon_pixels() -> Result<image::RgbaImage, image::ImageError> {
+    #[cfg(target_os = "macos")]
+    let image =
+        image::load_from_memory(include_bytes!("../assets/menubar-icon@2x.png"))?.into_rgba8();
+    #[cfg(not(target_os = "macos"))]
     let image = image::load_from_memory(include_bytes!("../assets/app-icon.png"))?
         .resize_exact(32, 32, image::imageops::FilterType::Lanczos3)
         .into_rgba8();
-    Ok(Icon::from_rgba(image.into_raw(), 32, 32)?)
+    Ok(image)
+}
+fn icon() -> Result<Icon, Box<dyn Error>> {
+    let image = icon_pixels()?;
+    let (width, height) = image.dimensions();
+    Ok(Icon::from_rgba(image.into_raw(), width, height)?)
 }
 impl Resident {
     fn open(&mut self) {
@@ -69,11 +81,32 @@ impl ApplicationHandler<Event> for Resident {
                 TrayIconBuilder::new()
                     .with_tooltip("图片反馈 · 轻量常驻入口")
                     .with_icon(icon()?)
+                    .with_icon_as_template(TEMPLATE_ICON)
                     .with_menu(Box::new(menu))
                     .with_menu_on_left_click(false)
                     .build()?,
             );
-            if self.open_initially {
+            if let Some(folder) = self.smoke_output.as_ref() {
+                #[cfg(target_os = "macos")]
+                super::platform::verify_menu_bar_template(self.tray.as_ref().unwrap())?;
+                let pixels = icon_pixels()?;
+                std::fs::create_dir_all(folder)?;
+                let report = serde_json::json!({
+                    "result": "passed",
+                    "platform": std::env::consts::OS,
+                    "template_expected": TEMPLATE_ICON,
+                    "native_template_checked": cfg!(target_os = "macos"),
+                    "pixel_dimensions": [pixels.width(), pixels.height()],
+                    "method": "real native tray creation; macOS reads NSImage.isTemplate",
+                    "limitations": "Not a screenshot or visual dark/light mode automation"
+                });
+                std::fs::write(
+                    folder.join("tray-report.json"),
+                    serde_json::to_vec_pretty(&report)?,
+                )?;
+                self.tray.take();
+                event_loop.exit();
+            } else if self.open_initially {
                 self.open();
             }
             Ok(())
@@ -99,6 +132,16 @@ impl ApplicationHandler<Event> for Resident {
     fn window_event(&mut self, _: &ActiveEventLoop, _: WindowId, _: WindowEvent) {}
 }
 pub fn run(open_initially: bool) -> Result<(), Box<dyn Error>> {
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    let smoke_output = args
+        .iter()
+        .position(|a| a == "--tray-smoke")
+        .map(|i| {
+            args.get(i + 1)
+                .map(PathBuf::from)
+                .ok_or("--tray-smoke requires an output directory")
+        })
+        .transpose()?;
     std::fs::create_dir_all(super::app_dir())?;
     let lock = std::fs::File::options()
         .read(true)
@@ -107,6 +150,9 @@ pub fn run(open_initially: bool) -> Result<(), Box<dyn Error>> {
         .truncate(false)
         .open(super::app_dir().join("resident.lock"))?;
     if lock.try_lock().is_err() {
+        if smoke_output.is_some() {
+            return Err("A resident is already running; it was preserved".into());
+        }
         #[cfg(target_os = "macos")]
         if super::platform::activate_editor() {
             return Ok(());
@@ -160,6 +206,7 @@ pub fn run(open_initially: bool) -> Result<(), Box<dyn Error>> {
         quit: None,
         child: None,
         open_initially,
+        smoke_output,
         error: None,
     };
     events.run_app(&mut app)?;
@@ -201,3 +248,46 @@ pub fn focus_pid(pid: u32) {
 }
 #[cfg(not(windows))]
 pub fn focus_pid(_pid: u32) {}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn menu_bar_assets_are_transparent_monochrome_at_both_scales() {
+        for (bytes, size) in [
+            (include_bytes!("../assets/menubar-icon.png").as_slice(), 18),
+            (
+                include_bytes!("../assets/menubar-icon@2x.png").as_slice(),
+                36,
+            ),
+        ] {
+            let pixels = image::load_from_memory(bytes).unwrap().into_rgba8();
+            assert_eq!(pixels.dimensions(), (size, size));
+            assert!(pixels.pixels().all(|p| p[0] == 0 && p[1] == 0 && p[2] == 0));
+            assert!(pixels.pixels().any(|p| p[3] == 255));
+            assert!(pixels.pixels().any(|p| p[3] > 0 && p[3] < 255));
+            for (x, y) in [(0, 0), (size - 1, 0), (0, size - 1), (size - 1, size - 1)] {
+                assert_eq!(pixels.get_pixel(x, y)[3], 0);
+            }
+        }
+    }
+
+    #[test]
+    fn only_macos_uses_the_template_resource() {
+        let pixels = icon_pixels().unwrap();
+        if cfg!(target_os = "macos") {
+            assert!(TEMPLATE_ICON);
+            assert_eq!(pixels.dimensions(), (36, 36));
+            assert!(pixels.pixels().all(|p| p[0] == p[1] && p[1] == p[2]));
+        } else {
+            assert!(!TEMPLATE_ICON);
+            assert_eq!(pixels.dimensions(), (32, 32));
+            assert!(
+                pixels
+                    .pixels()
+                    .any(|p| p[3] != 0 && (p[0] != p[1] || p[1] != p[2]))
+            );
+        }
+    }
+}

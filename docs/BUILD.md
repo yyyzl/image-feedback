@@ -28,7 +28,7 @@ pwsh -File scripts/package-windows.ps1
 运行真实安装、运行中阻止更新、同版本修复安装、已安装程序窗口测试、卸载与数据保留验证：
 
 ```powershell
-pwsh -File scripts/verify-windows-install.ps1 -Installer dist/windows/ImageFeedback-0.1.0-windows-x64-setup.exe
+pwsh -File scripts/verify-windows-install.ps1 -Installer dist/windows/ImageFeedback-0.1.1-windows-x64-setup.exe
 ```
 
 验证脚本检测到已有正式安装时会停止，不覆盖用户安装。它只结束自己启动的、没有编辑器子进程的空闲测试托盘，不终止用户编辑窗口。安装器本身不使用强制进程结束。当前修复测试不是跨版本升级测试；所有升级必须保留[安装器AppId](<../packaging/windows/ImageFeedback.iss>)。
@@ -40,14 +40,14 @@ pwsh -File scripts/verify-windows-install.ps1 -Installer dist/windows/ImageFeedb
 ```sh
 rustup target add aarch64-apple-darwin x86_64-apple-darwin
 bash scripts/package-macos.sh
-bash scripts/verify-macos.sh dist/macos/ImageFeedback-0.1.0-macos-universal-adhoc.dmg
+bash scripts/verify-macos.sh dist/macos/ImageFeedback-0.1.1-macos-universal-adhoc.dmg
 ```
 
 [打包脚本](<../scripts/package-macos.sh>)分别构建arm64/x86_64并以lipo合并，生成Info.plist、icns、许可资源和Applications软链接；两个架构都检查动态库和部署目标。非系统动态库必须完整捆绑，不能通过删除检查来掩盖缺失依赖。最低构建目标为macOS13.0，CI运行系统与最低版本不是同一个测试维度。
 
 当前只做ad-hoc完整性签名，不提供Developer ID、公证或Gatekeeper信任保证。添加正式签名需由维护者通过受保护GitHub Secrets配置Apple凭据；不要提交证书或密码。签名应在lipo和资源修改之后，未来新增Frameworks时从内向外处理。
 
-[安装验证](<../scripts/verify-macos.sh>)挂载DMG、复制`.app`到独立Applications测试目录、推出DMG后在构建树外启动。它在本机架构实际运行窗口回归，并检查正常入口的resident/editor进程；Universal包含两个slice不等于两个架构都运行，Intel验证使用独立Intel job。
+[安装验证](<../scripts/verify-macos.sh>)挂载DMG、复制`.app`到独立Applications测试目录、推出DMG后在构建树外启动。它在本机架构实际创建菜单栏项并读取 `NSImage.isTemplate`，随后运行窗口回归，并检查正常入口的resident/editor进程；Universal包含两个slice不等于两个架构都运行，Intel验证使用独立Intel job。
 
 ## macOS原生生命周期
 
@@ -61,4 +61,4 @@ bash scripts/verify-macos.sh dist/macos/ImageFeedback-0.1.0-macos-universal-adho
 
 [CI](<../.github/workflows/build.yml>)运行Windows、Apple Silicon和Intel验证。标签发行只在所需job成功后发布安装器、Universal DMG及SHA-256；源码、工具和测试数据不混入用户图片。
 
-窗口回归使用真实Slint窗口及场景事件、隔离剪贴板，不是操作系统鼠标/UIA E2E。macOS检查真实decoration配置，并调用AppKit `terminate:` 验证退出保护；不把Slint内容截图称为原生traffic-light截图。真实IME、触控板、多屏、Gatekeeper、干净Windows虚拟机及最低macOS版本仍需专项用户实机验收。
+窗口回归使用真实Slint窗口及场景事件、隔离剪贴板，不是操作系统鼠标/UIA E2E。场景开始前按加载、文件工作与分析状态等待就绪，附加等待上限30秒；超时保留状态和窗口截图，不跳过失败场景。macOS检查真实decoration配置，并调用AppKit `terminate:` 验证退出保护；不把Slint内容截图称为原生traffic-light截图。真实IME、触控板、多屏、Gatekeeper、干净Windows虚拟机及最低macOS版本仍需专项用户实机验收。

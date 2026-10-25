@@ -24,6 +24,7 @@ mod dialog_smoke;
 mod editor_tests;
 mod platform;
 mod resident;
+mod smoke_ready;
 
 #[derive(Clone, Copy, Default)]
 struct View {
@@ -2474,9 +2475,14 @@ fn run_editor(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
             .and_then(|s| s.parse::<u64>().ok())
             .filter(|ms| (500..=30_000).contains(ms))
             .unwrap_or(2_000);
-        slint::Timer::single_shot(Duration::from_millis(wait_ms), move || {
-            if let Some(ui) = weak.upgrade() {
-                let result = smoke_interactions(&ui, &state, &folder);
+        smoke_ready::start(
+            weak,
+            state.clone(),
+            folder.clone(),
+            failure.clone(),
+            Duration::from_millis(wait_ms),
+            move |ui| {
+                let result = smoke_interactions(ui, &state, &folder);
                 if let Err(err) = result {
                     *failure.borrow_mut() = Some(err.clone());
                     let _ = std::fs::create_dir_all(&folder);
@@ -2519,8 +2525,8 @@ fn run_editor(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
                         let _ = ui.hide();
                     }
                 });
-            }
-        });
+            },
+        );
     }
     if let Some(index) = args.iter().position(|arg| arg == "--dialog-smoke") {
         let folder = args
@@ -2531,11 +2537,16 @@ fn run_editor(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
         let state = editor.clone();
         let t = timer.clone();
         let failure = smoke_result.clone();
-        slint::Timer::single_shot(Duration::from_secs(2), move || {
-            if let Some(ui) = weak.upgrade() {
-                dialog_smoke::start(&ui, &state, &t, folder, failure);
-            }
-        });
+        smoke_ready::start(
+            weak,
+            state.clone(),
+            folder.clone(),
+            failure.clone(),
+            Duration::from_secs(2),
+            move |ui| {
+                dialog_smoke::start(ui, &state, &t, folder, failure);
+            },
+        );
     }
     if let Some(index) = args.iter().position(|arg| arg == "--delivery-smoke") {
         let folder = args
@@ -2546,11 +2557,16 @@ fn run_editor(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
         let state = editor.clone();
         let t = timer.clone();
         let failure = smoke_result.clone();
-        slint::Timer::single_shot(Duration::from_secs(2), move || {
-            if let Some(ui) = weak.upgrade() {
-                delivery_smoke::start(&ui, &state, &t, folder, failure);
-            }
-        });
+        smoke_ready::start(
+            weak,
+            state.clone(),
+            folder.clone(),
+            failure.clone(),
+            Duration::from_secs(2),
+            move |ui| {
+                delivery_smoke::start(ui, &state, &t, folder, failure);
+            },
+        );
     }
     slint::run_event_loop()?;
     timer.stop();
@@ -2633,7 +2649,7 @@ fn main() {
     };
     if let Err(error) = result {
         eprintln!("{error}");
-        if !smoke {
+        if !smoke && !args.iter().any(|a| a == "--tray-smoke") {
             let description = error.to_string();
             let _ = std::fs::create_dir_all(app_dir());
             let _ = std::fs::write(app_dir().join("last-startup-error.txt"), &description);

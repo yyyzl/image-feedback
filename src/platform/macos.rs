@@ -157,6 +157,30 @@ pub fn install_reopen_handler(handler: impl Fn() + 'static) -> Result<(), String
     }
     Ok(())
 }
+/// Inspect the actual status-item image on the resident's main thread.
+pub fn verify_menu_bar_template(tray: &tray_icon::TrayIcon) -> Result<(), String> {
+    let status = tray
+        .ns_status_item()
+        .ok_or("Native menu-bar item is missing")?;
+    unsafe {
+        let item = std::ptr::from_ref(&*status).cast_mut().cast::<c_void>();
+        let button = send_object(item, b"button\0");
+        if button.is_null() {
+            return Err("Native menu-bar button is missing".into());
+        }
+        let image = send_object(button, b"image\0");
+        if image.is_null() {
+            return Err("Native menu-bar image is missing".into());
+        }
+        // AppKit BOOL occupies one byte on both supported macOS architectures.
+        let is_template: unsafe extern "C" fn(Obj, Obj) -> u8 =
+            std::mem::transmute(objc_msgSend as *const ());
+        if is_template(image, sel_registerName(c"isTemplate".as_ptr())) == 0 {
+            return Err("Menu-bar NSImage was not configured as a template".into());
+        }
+    }
+    Ok(())
+}
 /// Tests the real AppKit Quit entry, not just a synthetic keyboard event.
 pub fn request_native_quit() {
     unsafe {

@@ -4,7 +4,7 @@ mod macos;
 #[cfg(target_os = "macos")]
 pub use macos::{
     activate_editor, configure_editor_backend, install_quit_handler, install_reopen_handler,
-    request_native_quit, start_activation_server,
+    request_native_quit, start_activation_server, verify_menu_bar_template,
 };
 
 #[cfg(not(target_os = "macos"))]

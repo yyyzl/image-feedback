@@ -1,4 +1,4 @@
-# macOS 菜单栏单色图标提案
+# macOS 菜单栏单色图标
 
 ## 设计方向
 
@@ -13,7 +13,7 @@
 
 ## 接入边界
 
-本轮只制作资源和预览，等待用户确认，不修改菜单栏加载逻辑、不替换已发布包。确认后仅 macOS resident 使用该资源并开启 `TrayIconBuilder::with_icon_as_template(true)`；由 AppKit 根据菜单栏背景及选中态自动着色，而不是根据应用深浅主题硬编码白色。现有 tray-icon 0.21.3 会将菜单栏图片设为 18 pt 高，可输入 36 px PNG 保留 Retina 清晰度。
+外形已经用户确认，v0.1.1 仅 macOS resident 使用该资源并开启 `TrayIconBuilder::with_icon_as_template(true)`；由 AppKit 根据菜单栏背景及选中态自动着色，而不是根据应用深浅主题硬编码白色。现有 tray-icon 0.21.3 会将菜单栏图片设为 18 pt 高，可输入 36 px PNG 保留 Retina 清晰度。
 
 Dock、Applications、Windows EXE 及 Windows 托盘继续使用现有彩色图标。
 
@@ -25,4 +25,4 @@ python scripts/generate-menubar-icon.py --preview design/macos-menubar-icon/prev
 
 开发期需要 Pillow；程序运行不依赖 Python/Pillow。几何读取 SVG，复用现有图标生成器的路径解析，预览图也由同一份几何生成。
 
-已检查输出尺寸、透明四角、非空 alpha 和纯黑 RGB；已查看明暗预览中的菜单栏相邻图标及放大轮廓。局部低风险设计由主代理自检，未作独立视觉评审；尚未在真实 Mac 菜单栏验证，也未声称系统明暗切换已接通。本轮不涉及动效或界面文案修改。
+已检查输出尺寸、透明四角、非空 alpha 和纯黑 RGB；已查看明暗预览中的菜单栏相邻图标及放大轮廓。局部低风险设计由主代理自检，未作独立视觉评审；macOS 安装回归新增真实菜单栏创建和 `NSImage.isTemplate` 读取检查，在 Apple Silicon 和 Intel 上随包运行；不将模板标志检查或合成预览称为实际深浅模式截图验收。本轮不涉及动效或界面文案修改。
