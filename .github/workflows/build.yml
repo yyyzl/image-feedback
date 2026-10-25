@@ -31,6 +31,7 @@ jobs:
             ~/.cargo/git
             target
           key: windows-rust-1.95-${{ hashFiles('Cargo.lock') }}
+          restore-keys: windows-rust-1.95-
       - name: Formatting and Rust regression
         run: |
           cargo fmt --all -- --check
@@ -78,6 +79,7 @@ jobs:
             ~/.cargo/git
             target
           key: macos-arm-rust-1.95-${{ hashFiles('Cargo.lock') }}
+          restore-keys: macos-arm-rust-1.95-
       - name: Formatting and native Rust regression
         run: |
           cargo fmt --all -- --check
