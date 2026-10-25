@@ -65,14 +65,6 @@ done
 codesign --force --sign - --timestamp=none "$APP"
 codesign --verify --deep --strict --verbose=2 "$APP"
 ln -s /Applications "$STAGE/Applications"
-cat > "$STAGE/READ-ME-FIRST.txt" <<'EOF'
-Image Feedback
-Drag Image Feedback.app to Applications, then run it from Applications.
-This open-source build is ad-hoc signed, not Apple-notarized.
-On first launch, macOS may require Open Anyway in System Settings > Privacy & Security.
-The app contains its runtime; Rust, Qt, Node.js and Homebrew are not required.
-The red native close button closes the editor; the menu-bar entry is independent.
-EOF
 DMG="$ROOT/dist/macos/ImageFeedback-$VERSION-macos-universal-adhoc.dmg"
 [[ ! -e "$DMG" ]] || { echo "Refusing to replace existing DMG: $DMG" >&2; exit 1; }
 hdiutil create -volname 'Image Feedback' -srcfolder "$STAGE" -format UDZO "$DMG"
