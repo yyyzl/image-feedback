@@ -25,7 +25,7 @@ BIN="$APP/Contents/MacOS/ImageFeedback"
 test -x "$BIN"
 test -s "$APP/Contents/Resources/AppIcon.icns"
 test -s "$APP/Contents/Resources/licenses/THIRD_PARTY_LICENSES.html"
-xcrun lipo -verify_arch arm64 x86_64 "$BIN"
+xcrun lipo "$BIN" -verify_arch arm64 x86_64
 codesign --verify --deep --strict "$APP"
 cd "$WORK"
 "$BIN" --version
