@@ -1,0 +1,36 @@
+"""Generate an original deterministic test image, not an application screenshot."""
+from pathlib import Path
+from PIL import Image, ImageDraw, ImageFont
+root=Path(__file__).resolve().parents[1]
+(root/'assets').mkdir(exist_ok=True)
+im=Image.new('RGB',(1200,780),'#f8f6f0'); d=ImageDraw.Draw(im)
+fonts=Path('C:/Windows/Fonts')
+def font(size,bold=False,serif=False):
+    p=fonts/('timesbd.ttf' if serif else 'segoeuib.ttf' if bold else 'segoeui.ttf')
+    return ImageFont.truetype(str(p),size)
+d.text((50,30),'F O R M',fill='#252a2c',font=font(22,True))
+for x,t in [(510,'Products'),(640,'Spaces'),(750,'Journal'),(865,'About')]:d.text((x,36),t,fill='#5c605f',font=font(13))
+d.text((58,205),'Make room',fill='#202428',font=font(62,serif=True))
+d.text((58,280),'for better ideas.',fill='#202428',font=font(62,serif=True))
+d.text((62,380),'Thoughtful furniture for a calmer,',fill='#737876',font=font(19))
+d.text((62,410),'more creative home.',fill='#737876',font=font(19))
+d.rounded_rectangle((62,493,270,545),radius=7,fill='#252b2c')
+d.text((85,507),'Explore the collection',fill='white',font=font(15))
+d.rectangle((595,136,1145,688),fill='#dfd5c4')
+d.rectangle((620,158,1120,625),fill='#eee6d8')
+d.rounded_rectangle((756,210,1085,630),radius=155,fill='#d4c4ac')
+d.rectangle((756,390,1085,631),fill='#d4c4ac')
+d.polygon([(595,626),(1145,626),(1145,688),(595,688)],fill='#c4b59f')
+d.ellipse((752,593,1095,648),fill='#b3a58e')
+# Sculptural cobalt chair: simple shapes to exercise rectangular region moves.
+d.rounded_rectangle((790,370,1065,594),radius=90,fill='#1f4791')
+d.rounded_rectangle((816,390,1042,545),radius=60,fill='#315baa')
+d.ellipse((822,454,1046,574),fill='#1a3c7b')
+d.rounded_rectangle((791,473,851,613),radius=26,fill='#315dad')
+d.rounded_rectangle((1018,470,1073,613),radius=26,fill='#244d97')
+d.rounded_rectangle((827,564,860,645),radius=12,fill='#1b3b74')
+d.rounded_rectangle((1003,563,1035,645),radius=12,fill='#1b3b74')
+d.line((56,705,215,705),fill='#b6b6ae',width=1)
+d.text((58,722),'01 / 03     <     >',fill='#777a74',font=font(14))
+im.save(root/'assets'/'demo.png',optimize=True)
+print('Created assets/demo.png (1200 x 780)')

@@ -1,0 +1,39 @@
+[package]
+name = "image-feedback-slint"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.92"
+description = "A lightweight, local-first desktop image feedback editor built with Rust and Slint"
+license = "MIT"
+repository = "https://github.com/yyyzl/image-feedback"
+homepage = "https://github.com/yyyzl/image-feedback"
+authors = ["Image Feedback contributors"]
+publish = false
+build = "build.rs"
+
+[dependencies]
+slint = { version = "=1.18.1", default-features = false, features = ["std", "backend-winit", "renderer-femtovg", "renderer-software", "compat-1-2", "unstable-winit-030"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+base64 = "0.22"
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "webp", "bmp"] }
+rfd = "0.17"
+arboard = { version = "3.6", default-features = false, features = ["image-data"] }
+zip = { version = "4", default-features = false, features = ["deflate"] }
+tray-icon = "0.21"
+# Lifecycle hooks are checked against this exact delegate implementation.
+winit = "=0.30.13"
+
+[build-dependencies]
+slint-build = "=1.18.1"
+
+[target.'cfg(windows)'.build-dependencies]
+winresource = { version = "0.1.34", default-features = false }
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = "symbols"
+
+[profile.dev]
+debug = 0

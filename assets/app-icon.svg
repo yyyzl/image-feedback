@@ -1,0 +1,8 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="512" height="512" viewBox="0 0 512 512">
+  <!-- Original Image Feedback mark. Transparent outside the indigo tile. -->
+  <rect x="24" y="24" width="464" height="464" rx="112" fill="#5158D8"/>
+  <path d="M152 126 H360 Q400 126 400 166 V314 Q400 354 360 354 H280 L221 399 V354 H152 Q112 354 112 314 V166 Q112 126 152 126 Z" fill="none" stroke="#FFFFFF" stroke-width="28" stroke-linejoin="round" stroke-linecap="round"/>
+  <path d="M157 284 L214 225 L266 280 L300 246 L349 295" fill="none" stroke="#FFFFFF" stroke-width="23" stroke-linejoin="round" stroke-linecap="round"/>
+  <circle cx="384" cy="134" r="52" fill="#FFFFFF"/>
+  <circle cx="384" cy="134" r="40" fill="#FF766B"/>
+</svg>

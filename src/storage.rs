@@ -1,0 +1,619 @@
+//! Bounded local files, portable projects and feedback export. No network or host IDs.
+use crate::document::{AnnotationKind, Document, Rect};
+use image::{ImageEncoder, Rgba, RgbaImage};
+use serde::Serialize;
+use std::fs::{self, File};
+use std::io::{Cursor, Read, Write};
+use std::path::{Path, PathBuf};
+use std::time::{SystemTime, UNIX_EPOCH};
+use zip::{ZipArchive, ZipWriter, write::SimpleFileOptions};
+
+pub const MAX_FILE_BYTES: u64 = 64 * 1024 * 1024;
+pub const MAX_PIXELS: u64 = 40_000_000;
+const MAX_JSON: u64 = 4 * 1024 * 1024;
+
+pub struct Asset {
+    pub pixels: RgbaImage,
+    pub original: Vec<u8>,
+    pub extension: String,
+    pub name: String,
+    /// Disk origin is session-only metadata, never serialized into a portable project.
+    pub source_path: Option<PathBuf>,
+}
+
+pub fn png_bytes(pixels: &RgbaImage) -> Result<Vec<u8>, String> {
+    let mut out = Vec::new();
+    image::codecs::png::PngEncoder::new(&mut out)
+        .write_image(
+            pixels.as_raw(),
+            pixels.width(),
+            pixels.height(),
+            image::ExtendedColorType::Rgba8,
+        )
+        .map_err(|e| e.to_string())?;
+    Ok(out)
+}
+
+impl Asset {
+    pub fn from_bytes(bytes: Vec<u8>, name: String) -> Result<Self, String> {
+        if bytes.len() as u64 > MAX_FILE_BYTES {
+            return Err("图片文件不能超过 64 MiB".into());
+        }
+        let format = image::guess_format(&bytes)
+            .map_err(|_| "不支持的图片格式；请选择 PNG/JPEG/WebP/BMP")?;
+        let extension = match format {
+            image::ImageFormat::Png => "png",
+            image::ImageFormat::Jpeg => "jpg",
+            image::ImageFormat::WebP => "webp",
+            image::ImageFormat::Bmp => "bmp",
+            _ => return Err("请选择 PNG、JPEG、WebP 或 BMP 图片".into()),
+        }
+        .to_string();
+        let mut reader = image::ImageReader::with_format(Cursor::new(&bytes), format);
+        let (w, h) = reader
+            .into_dimensions()
+            .map_err(|e| format!("无法读取图片尺寸：{e}"))?;
+        if w == 0 || h == 0 || w as u64 * h as u64 > MAX_PIXELS {
+            return Err("图片超过 4000 万像素的原型安全上限".into());
+        }
+        reader = image::ImageReader::with_format(Cursor::new(&bytes), format);
+        let mut limits = image::Limits::default();
+        limits.max_alloc = Some(320 * 1024 * 1024);
+        reader.limits(limits);
+        let pixels = reader
+            .decode()
+            .map_err(|e| format!("图片解码失败：{e}"))?
+            .to_rgba8();
+        Ok(Self {
+            pixels,
+            original: bytes,
+            extension,
+            name,
+            source_path: None,
+        })
+    }
+    pub fn open(path: &Path) -> Result<Self, String> {
+        let metadata = fs::metadata(path).map_err(|e| e.to_string())?;
+        if metadata.len() > MAX_FILE_BYTES {
+            return Err("图片文件不能超过 64 MiB".into());
+        }
+        let mut bytes = Vec::new();
+        File::open(path)
+            .map_err(|e| e.to_string())?
+            .take(MAX_FILE_BYTES + 1)
+            .read_to_end(&mut bytes)
+            .map_err(|e| e.to_string())?;
+        Self::from_bytes(
+            bytes,
+            path.file_name()
+                .unwrap_or_default()
+                .to_string_lossy()
+                .into_owned(),
+        )
+        .map(|mut asset| {
+            asset.source_path = std::path::absolute(path).ok();
+            asset
+        })
+    }
+    pub fn from_rgba(pixels: RgbaImage, name: &str) -> Result<Self, String> {
+        if pixels.width() as u64 * pixels.height() as u64 > MAX_PIXELS {
+            return Err("图片超过 4000 万像素的安全上限".into());
+        }
+        let original = png_bytes(&pixels)?;
+        Ok(Self {
+            pixels,
+            original,
+            extension: "png".into(),
+            name: name.into(),
+            source_path: None,
+        })
+    }
+}
+
+fn unique_suffix() -> String {
+    format!(
+        "{}-{}",
+        std::process::id(),
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos()
+    )
+}
+
+/// Sibling temporary file followed by atomic replacement; never delete a good saved project first.
+fn atomic_file(path: &Path, bytes: &[u8]) -> Result<(), String> {
+    let parent = path
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .unwrap_or(Path::new("."));
+    let temp = parent.join(format!(".image-feedback-{}.tmp", unique_suffix()));
+    let result = (|| {
+        let mut file = File::options()
+            .write(true)
+            .create_new(true)
+            .open(&temp)
+            .map_err(|e| e.to_string())?;
+        file.write_all(bytes)
+            .and_then(|_| file.sync_all())
+            .map_err(|e| e.to_string())?;
+        drop(file);
+        #[cfg(windows)]
+        {
+            use std::os::windows::ffi::OsStrExt;
+            #[link(name = "kernel32")]
+            unsafe extern "system" {
+                fn MoveFileExW(existing: *const u16, new: *const u16, flags: u32) -> i32;
+            }
+            let from: Vec<u16> = temp.as_os_str().encode_wide().chain(Some(0)).collect();
+            let to: Vec<u16> = path.as_os_str().encode_wide().chain(Some(0)).collect();
+            // MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH
+            if unsafe { MoveFileExW(from.as_ptr(), to.as_ptr(), 0x1 | 0x8) } == 0 {
+                return Err(std::io::Error::last_os_error().to_string());
+            }
+        }
+        #[cfg(not(windows))]
+        fs::rename(&temp, path).map_err(|e| e.to_string())?;
+        Ok(())
+    })();
+    if result.is_err() && temp.exists() {
+        let _ = fs::remove_file(&temp);
+    }
+    result
+}
+
+pub fn save_project(path: &Path, doc: &Document, asset: &Asset) -> Result<(), String> {
+    doc.validate()?;
+    verify_asset(doc, asset)?;
+    let json = serde_json::to_vec_pretty(doc).map_err(|e| e.to_string())?;
+    if json.len() as u64 > MAX_JSON {
+        return Err("项目数据超过 4 MiB 上限，请减少批注文本后保存".into());
+    }
+    if asset.original.len() as u64 > MAX_FILE_BYTES {
+        return Err("原图文件超过 64 MiB 上限".into());
+    }
+    let mut cursor = Cursor::new(Vec::new());
+    {
+        let mut zip = ZipWriter::new(&mut cursor);
+        zip.start_file(
+            "project.json",
+            SimpleFileOptions::default().compression_method(zip::CompressionMethod::Deflated),
+        )
+        .map_err(|e| e.to_string())?;
+        zip.write_all(&json).map_err(|e| e.to_string())?;
+        zip.start_file(
+            "original.bin",
+            SimpleFileOptions::default().compression_method(zip::CompressionMethod::Stored),
+        )
+        .map_err(|e| e.to_string())?;
+        zip.write_all(&asset.original).map_err(|e| e.to_string())?;
+        zip.finish().map_err(|e| e.to_string())?;
+    }
+    atomic_file(path, &cursor.into_inner())
+}
+
+fn read_entry(archive: &mut ZipArchive<File>, name: &str, max: u64) -> Result<Vec<u8>, String> {
+    let entry = archive
+        .by_name(name)
+        .map_err(|_| format!("项目缺少 {name}"))?;
+    if entry.size() > max {
+        return Err(format!("项目条目过大：{name}"));
+    }
+    let mut result = Vec::new();
+    entry
+        .take(max + 1)
+        .read_to_end(&mut result)
+        .map_err(|e| e.to_string())?;
+    if result.len() as u64 > max {
+        return Err(format!("项目条目过大：{name}"));
+    }
+    Ok(result)
+}
+
+pub fn open_project(path: &Path) -> Result<(Document, Asset), String> {
+    if fs::metadata(path).map_err(|e| e.to_string())?.len() > MAX_FILE_BYTES + MAX_JSON {
+        return Err("项目文件超过安全上限".into());
+    }
+    let mut archive = ZipArchive::new(File::open(path).map_err(|e| e.to_string())?)
+        .map_err(|e| format!("无效的项目文件：{e}"))?;
+    // Read exactly two known entries; never extract arbitrary archive paths onto the filesystem.
+    if archive.len() != 2 {
+        return Err("项目应恰好包含 project.json 与 original.bin".into());
+    }
+    let json = read_entry(&mut archive, "project.json", MAX_JSON)?;
+    let doc: Document = serde_json::from_slice(&json).map_err(|e| format!("项目数据无效：{e}"))?;
+    doc.validate()?;
+    let bytes = read_entry(&mut archive, "original.bin", MAX_FILE_BYTES)?;
+    let asset = Asset::from_bytes(bytes, doc.image.file_name.clone())?;
+    verify_asset(&doc, &asset)?;
+    Ok((doc, asset))
+}
+
+fn verify_asset(doc: &Document, asset: &Asset) -> Result<(), String> {
+    if !["png", "jpg", "webp", "bmp"].contains(&asset.extension.as_str()) {
+        return Err("无效的原图扩展名".into());
+    }
+    if (doc.image.width, doc.image.height) != (asset.pixels.width(), asset.pixels.height()) {
+        return Err("项目图片尺寸与原图不一致".into());
+    }
+    Ok(())
+}
+
+#[derive(Serialize)]
+struct Feedback<'a> {
+    schema: &'static str,
+    coordinate_space: &'static str,
+    original: String,
+    reference: &'static str,
+    original_pixels_unchanged: bool,
+    document: &'a Document,
+}
+
+pub fn feedback_text(doc: &Document) -> String {
+    let mut text = format!(
+        "# 图片修改意见\n\n图片：{}（{} × {} 像素）\n坐标以原图像素为准；原图保持不变。请结合 original 与 reference.png 阅读。\n\n",
+        doc.image.file_name, doc.image.width, doc.image.height
+    );
+    for (index, note) in doc.annotations.iter().enumerate() {
+        let location = match &note.kind {
+            AnnotationKind::Point { point } => format!("点位置 ({:.0}, {:.0})", point.x, point.y),
+            AnnotationKind::Region { rect } => format!(
+                "范围 ({:.0}, {:.0}, {:.0}, {:.0})",
+                rect.x, rect.y, rect.width, rect.height
+            ),
+            AnnotationKind::Block { source, target } => format!(
+                "移动图块：来源 ({:.0}, {:.0}, {:.0}, {:.0}) → 目标 ({:.0}, {:.0}, {:.0}, {:.0})",
+                source.x,
+                source.y,
+                source.width,
+                source.height,
+                target.x,
+                target.y,
+                target.width,
+                target.height
+            ),
+            AnnotationKind::Global => "全局意见".into(),
+        };
+        text.push_str(&format!(
+            "{}. {}\n   {}\n\n",
+            index + 1,
+            location,
+            if note.text.trim().is_empty() {
+                "（按标记的位置／布局调整）"
+            } else {
+                note.text.trim()
+            }
+        ));
+    }
+    text
+}
+
+fn put(img: &mut RgbaImage, x: i32, y: i32, color: Rgba<u8>) {
+    if x >= 0 && y >= 0 && (x as u32) < img.width() && (y as u32) < img.height() {
+        img.put_pixel(x as u32, y as u32, color);
+    }
+}
+fn line(img: &mut RgbaImage, x1: i32, y1: i32, x2: i32, y2: i32, color: Rgba<u8>, thickness: i32) {
+    let steps = (x2 - x1).abs().max((y2 - y1).abs()).max(1);
+    for i in 0..=steps {
+        let t = i as f32 / steps as f32;
+        let x = (x1 as f32 + (x2 - x1) as f32 * t).round() as i32;
+        let y = (y1 as f32 + (y2 - y1) as f32 * t).round() as i32;
+        for dy in -thickness / 2..=thickness / 2 {
+            for dx in -thickness / 2..=thickness / 2 {
+                put(img, x + dx, y + dy, color);
+            }
+        }
+    }
+}
+const DIGITS: [[u8; 5]; 10] = [
+    [7, 5, 5, 5, 7],
+    [2, 6, 2, 2, 7],
+    [7, 1, 7, 4, 7],
+    [7, 1, 7, 1, 7],
+    [5, 5, 7, 1, 1],
+    [7, 4, 7, 1, 7],
+    [7, 4, 7, 5, 7],
+    [7, 1, 1, 1, 1],
+    [7, 5, 7, 5, 7],
+    [7, 5, 7, 1, 7],
+];
+fn pin(img: &mut RgbaImage, x: f32, y: f32, number: usize, scale: i32) {
+    let digits = number.to_string();
+    let r = (10 * scale).max((digits.len() as i32 * 4 * scale + 4 * scale) / 2);
+    let cx = (x.round() as i32).clamp(r, (img.width() as i32 - r - 1).max(r));
+    let cy = (y.round() as i32).clamp(r, (img.height() as i32 - r - 1).max(r));
+    for dy in -r..=r {
+        for dx in -r..=r {
+            if dx * dx + dy * dy <= r * r {
+                put(img, cx + dx, cy + dy, Rgba([220, 43, 57, 255]));
+            }
+        }
+    }
+    let start = cx - (digits.len() as i32 * 4 - 1) * scale / 2;
+    for (i, ch) in digits.bytes().enumerate() {
+        for (row, bits) in DIGITS[(ch - b'0') as usize].iter().enumerate() {
+            for col in 0..3 {
+                if bits & (1 << (2 - col)) != 0 {
+                    for py in 0..scale {
+                        for px in 0..scale {
+                            put(
+                                img,
+                                start + (i as i32 * 4 + col) * scale + px,
+                                cy - 5 * scale / 2 + row as i32 * scale + py,
+                                Rgba([255, 255, 255, 255]),
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+pub fn render_reference(doc: &Document, asset: &Asset) -> Result<RgbaImage, String> {
+    doc.validate()?;
+    verify_asset(doc, asset)?;
+    let mut result = asset.pixels.clone();
+    let scale = ((doc.image.width.min(doc.image.height) as f32 / 700.0).round() as i32).clamp(1, 4);
+    let red = Rgba([220, 43, 57, 255]);
+    let muted = Rgba([229, 230, 235, 255]);
+    // One rasterization policy for clearing AND copying; fractional edges cannot lose columns.
+    let raster = |r: Rect| {
+        let x = r.x.round() as u32;
+        let y = r.y.round() as u32;
+        (
+            x,
+            y,
+            ((r.x + r.width).round() as u32).saturating_sub(x),
+            ((r.y + r.height).round() as u32).saturating_sub(y),
+        )
+    };
+    // Cover every removed source first, then composite targets; never crop a previously moved layer.
+    for note in &doc.annotations {
+        if let AnnotationKind::Block { source, .. } = note.kind {
+            let (x, y, w, h) = raster(source);
+            for y in y..y + h {
+                for x in x..x + w {
+                    if x < result.width() && y < result.height() {
+                        result.put_pixel(x, y, muted);
+                    }
+                }
+            }
+        }
+    }
+    for note in &doc.annotations {
+        if let AnnotationKind::Block { source, target } = note.kind {
+            let (sx0, sy0, w, h) = raster(source);
+            for dy in 0..h {
+                for dx in 0..w {
+                    let sx = sx0 + dx;
+                    let sy = sy0 + dy;
+                    let tx = target.x.round() as u32 + dx;
+                    let ty = target.y.round() as u32 + dy;
+                    if sx < asset.pixels.width()
+                        && sy < asset.pixels.height()
+                        && tx < result.width()
+                        && ty < result.height()
+                    {
+                        result.put_pixel(tx, ty, *asset.pixels.get_pixel(sx, sy));
+                    }
+                }
+            }
+        }
+    }
+    for (index, note) in doc.annotations.iter().enumerate() {
+        let rect = match note.kind {
+            AnnotationKind::Region { rect } => Some(rect),
+            AnnotationKind::Block { target, .. } => Some(target),
+            _ => None,
+        };
+        if let Some(Rect {
+            x,
+            y,
+            width,
+            height,
+        }) = rect
+        {
+            let (x, y, x2, y2) = (
+                x.round() as i32,
+                y.round() as i32,
+                (x + width).round() as i32,
+                (y + height).round() as i32,
+            );
+            line(&mut result, x, y, x2, y, red, 2 * scale);
+            line(&mut result, x2, y, x2, y2, red, 2 * scale);
+            line(&mut result, x2, y2, x, y2, red, 2 * scale);
+            line(&mut result, x, y2, x, y, red, 2 * scale);
+            pin(&mut result, x as f32, y as f32, index + 1, scale);
+        } else if let AnnotationKind::Point { point } = note.kind {
+            pin(&mut result, point.x, point.y, index + 1, scale);
+        }
+    }
+    Ok(result)
+}
+
+/// Always create a unique new directory; never silently overwrite someone else's feedback.
+pub fn export_package(parent: &Path, doc: &Document, asset: &Asset) -> Result<PathBuf, String> {
+    doc.validate()?;
+    verify_asset(doc, asset)?;
+    let folder = parent.join(format!("image-feedback-{}", unique_suffix()));
+    fs::create_dir(&folder).map_err(|e| format!("无法创建导出目录：{e}"))?;
+    let result = (|| {
+        let original = format!("original.{}", asset.extension);
+        fs::write(folder.join(&original), &asset.original).map_err(|e| e.to_string())?;
+        let reference = render_reference(doc, asset)?;
+        fs::write(folder.join("reference.png"), png_bytes(&reference)?)
+            .map_err(|e| e.to_string())?;
+        fs::write(folder.join("feedback.md"), feedback_text(doc)).map_err(|e| e.to_string())?;
+        let feedback = Feedback {
+            schema: "image-feedback-package-1",
+            coordinate_space: "original-image-pixels",
+            original,
+            reference: "reference.png",
+            original_pixels_unchanged: true,
+            document: doc,
+        };
+        fs::write(
+            folder.join("feedback.json"),
+            serde_json::to_vec_pretty(&feedback).map_err(|e| e.to_string())?,
+        )
+        .map_err(|e| e.to_string())?;
+        Ok(folder.clone())
+    })();
+    // On error preserve the partial directory for diagnosis; do not falsely report a complete export.
+    result
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::document::Point;
+    fn asset() -> Asset {
+        Asset::from_rgba(
+            RgbaImage::from_pixel(80, 60, Rgba([30, 80, 140, 255])),
+            "test.png",
+        )
+        .unwrap()
+    }
+    fn temp() -> PathBuf {
+        let p = std::env::temp_dir().join(format!("image-feedback-test-{}", unique_suffix()));
+        fs::create_dir(&p).unwrap();
+        p
+    }
+    #[test]
+    fn original_bytes_survive_project_roundtrip() {
+        let a = asset();
+        let mut d = Document::new("测试.png", 80, 60).unwrap();
+        d.add_point(Point { x: 20., y: 20. }).unwrap();
+        let dir = temp();
+        let path = dir.join("中文.ifp");
+        save_project(&path, &d, &a).unwrap();
+        let (restored, im) = open_project(&path).unwrap();
+        assert_eq!(d, restored);
+        assert_eq!(a.original, im.original);
+        fs::remove_dir_all(dir).unwrap();
+    }
+    #[test]
+    fn save_replaces_existing_file_atomically() {
+        let a = asset();
+        let mut d = Document::new("x.png", 80, 60).unwrap();
+        let dir = temp();
+        let path = dir.join("x.ifp");
+        save_project(&path, &d, &a).unwrap();
+        d.add_global().unwrap();
+        save_project(&path, &d, &a).unwrap();
+        assert_eq!(open_project(&path).unwrap().0, d);
+        fs::remove_dir_all(dir).unwrap();
+    }
+    #[test]
+    fn rejects_mismatched_dimensions() {
+        let a = asset();
+        let d = Document::new("x.png", 81, 60).unwrap();
+        assert!(render_reference(&d, &a).is_err());
+    }
+    #[test]
+    fn reference_never_mutates_original() {
+        let a = asset();
+        let before = a.pixels.clone();
+        let mut d = Document::new("x.png", 80, 60).unwrap();
+        let id = d
+            .add_region(Rect {
+                x: 5.,
+                y: 5.,
+                width: 20.,
+                height: 20.,
+            })
+            .unwrap();
+        d.move_annotation(id, 30., 10.).unwrap();
+        let r = render_reference(&d, &a).unwrap();
+        assert_eq!(a.pixels, before);
+        assert_ne!(r, before);
+    }
+    #[test]
+    fn exports_four_portable_files_with_matching_numbering() {
+        let a = asset();
+        let mut d = Document::new("x.png", 80, 60).unwrap();
+        let id = d.add_point(Point { x: 40., y: 40. }).unwrap();
+        d.set_text(id, "移动按钮".into()).unwrap();
+        let dir = temp();
+        let output = export_package(&dir, &d, &a).unwrap();
+        assert_eq!(fs::read_dir(&output).unwrap().count(), 4);
+        let text = fs::read_to_string(output.join("feedback.md")).unwrap();
+        assert!(text.contains("1. 点位置"));
+        assert!(text.contains("移动按钮"));
+        let json: serde_json::Value =
+            serde_json::from_slice(&fs::read(output.join("feedback.json")).unwrap()).unwrap();
+        assert_eq!(json["original_pixels_unchanged"], true);
+        assert_eq!(fs::read(output.join("original.png")).unwrap(), a.original);
+        fs::remove_dir_all(dir).unwrap();
+    }
+    #[test]
+    fn export_does_not_overwrite_previous_package() {
+        let a = asset();
+        let d = Document::new("x.png", 80, 60).unwrap();
+        let dir = temp();
+        assert_ne!(
+            export_package(&dir, &d, &a).unwrap(),
+            export_package(&dir, &d, &a).unwrap()
+        );
+        fs::remove_dir_all(dir).unwrap();
+    }
+    #[test]
+    fn rejects_invalid_image() {
+        assert!(Asset::from_bytes(b"not an image".to_vec(), "x.png".into()).is_err());
+    }
+    #[test]
+    fn oversized_project_cannot_replace_a_good_save() {
+        let a = asset();
+        let mut d = Document::new("x.png", 80, 60).unwrap();
+        let dir = temp();
+        let path = dir.join("x.ifp");
+        save_project(&path, &d, &a).unwrap();
+        let before = fs::read(&path).unwrap();
+        for id in 1..=80 {
+            d.annotations.push(crate::document::Annotation {
+                id,
+                text: "字".repeat(20_000),
+                kind: AnnotationKind::Global,
+            });
+        }
+        d.next_id = 81;
+        d.validate().unwrap();
+        assert!(save_project(&path, &d, &a).is_err());
+        assert_eq!(fs::read(&path).unwrap(), before);
+        assert!(open_project(&path).is_ok());
+        fs::remove_dir_all(dir).unwrap();
+    }
+    #[test]
+    fn fractional_source_clearing_uses_the_same_columns_as_copying() {
+        let a = Asset::from_rgba(
+            RgbaImage::from_pixel(220, 150, Rgba([30, 80, 140, 255])),
+            "x.png",
+        )
+        .unwrap();
+        let mut d = Document::new("x.png", 220, 150).unwrap();
+        let id = d
+            .add_region(Rect {
+                x: 10.4,
+                y: 30.4,
+                width: 40.4,
+                height: 40.4,
+            })
+            .unwrap();
+        d.move_annotation(id, 100., 0.).unwrap();
+        let r = render_reference(&d, &a).unwrap();
+        assert_eq!(*r.get_pixel(50, 55), Rgba([229, 230, 235, 255]));
+        assert_eq!(*r.get_pixel(149, 55), Rgba([30, 80, 140, 255]));
+    }
+    #[test]
+    fn untrusted_export_extension_is_rejected() {
+        let mut a = asset();
+        a.extension = "../../other".into();
+        let d = Document::new("x.png", 80, 60).unwrap();
+        let dir = temp();
+        assert!(export_package(&dir, &d, &a).is_err());
+        assert_eq!(fs::read_dir(&dir).unwrap().count(), 0);
+        fs::remove_dir_all(dir).unwrap();
+    }
+}

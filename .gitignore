@@ -1,0 +1,21 @@
+/target/
+/artifacts/
+/dist/
+/.tools/
+/release-staging/
+*.ifp
+*.tmp
+.DS_Store
+Thumbs.db
+*.p12
+*.p8
+*.mobileprovision
+.env
+.env.*
+# Local prototype evidence links to ignored artifacts, not public distribution docs.
+/docs/VALIDATION.md
+/docs/COPY-HOVER-CHROME-FIX.md
+/docs/UNIFIED-DIALOGS.md
+/docs/DELIVERY-AND-FOCUS.md
+/docs/COMPACT-COPY.md
+/docs/FEATURE-PARITY.md

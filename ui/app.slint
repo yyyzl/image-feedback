@@ -1,0 +1,1179 @@
+import { ScrollView, TextEdit, Palette, AboutSlint } from "std-widgets.slint";
+
+export struct NoteRow {
+    id: int,
+    number: int,
+    kind-label: string,
+    text: string,
+    selected: bool,
+    detail: string,
+}
+
+export struct Mark {
+    id: int,
+    number: int,
+    x: float,
+    y: float,
+    w: float,
+    h: float,
+    is-point: bool,
+    selected: bool,
+    is-block: bool,
+    source-x: float,
+    source-y: float,
+    source-w: float,
+    source-h: float,
+}
+
+struct NoteViewState {
+    token: int,
+    index: int,
+    top: length,
+    bottom: length,
+    focused: bool,
+    active: bool,
+}
+
+// Purely presentational controls. Every application action is forwarded to Rust.
+component ActionButton inherits Rectangle {
+    in property <string> label;
+    in property <bool> primary: false;
+    in property <bool> quiet: false;
+    in property <bool> enabled: true;
+    in property <bool> destructive: false;
+    in property <bool> focus-ring: false;
+    out property <bool> hovered: hit.has-hover;
+    callback clicked();
+
+    height: 36px;
+    border-radius: 7px;
+    border-width: root.focus-ring ? 2px : (root.quiet ? 0px : 1px);
+    border-color: root.focus-ring ? (root.destructive ? #e7a4ad : #969bf0) : (root.primary ? (root.destructive ? #d35466 : #4f56cf) : #dfe3e9);
+    background: root.primary
+        ? (root.destructive ? (hit.has-hover && root.enabled ? #bc4355 : #d35466) : (hit.has-hover && root.enabled ? #4148bb : #4f56cf))
+        : (hit.has-hover && root.enabled ? #f1f3f6 : (root.quiet ? transparent : #ffffff));
+    opacity: root.enabled ? 1 : 0.42;
+    Text {
+        width: parent.width;
+        height: parent.height;
+        text: root.label;
+        color: root.primary ? #ffffff : (root.destructive ? #cb443b : #374151);
+        font-size: 12px;
+        font-weight: root.primary ? 600 : 500;
+        horizontal-alignment: center;
+        vertical-alignment: center;
+    }
+    hit := TouchArea {
+        enabled: root.enabled;
+        clicked => { root.clicked(); }
+    }
+}
+
+component ToolButton inherits Rectangle {
+    in property <image> icon;
+    in property <string> label;
+    in property <bool> active-state: false;
+    in property <bool> enabled: true;
+    callback clicked();
+
+    width: 48px;
+    height: 65px;
+    border-radius: 9px;
+    background: root.active-state ? #eef0ff : (hit.has-hover && root.enabled ? #f3f5f8 : transparent);
+    opacity: root.enabled ? 1 : 0.42;
+    Image {
+        x: 12px;
+        y: 9px;
+        width: 24px;
+        height: 24px;
+        source: root.icon;
+        image-fit: contain;
+    }
+    Text {
+        y: 39px;
+        width: parent.width;
+        height: 18px;
+        text: root.label;
+        color: root.active-state ? #4f56cf : #687182;
+        font-size: 11px;
+        font-weight: root.active-state ? 600 : 400;
+        horizontal-alignment: center;
+    }
+    hit := TouchArea {
+        enabled: root.enabled;
+        clicked => { root.clicked(); }
+    }
+}
+
+component WindowButton inherits Rectangle {
+    in property <int> kind: 0;
+    in property <bool> restored: false;
+    in property <string> description;
+    callback clicked();
+    width: 38px; height: 32px; border-radius: 7px;
+    background: hit.has-hover ? (root.kind == 2 ? #e45162 : #e9ecf4) : transparent;
+    accessible-role: button;
+    accessible-label: root.description;
+    if root.kind == 0 : Rectangle { x: 13px; y: 16px; width: 12px; height: 1.4px; background: #586174; }
+    if root.kind == 1 && !root.restored : Rectangle { x: 13px; y: 10px; width: 12px; height: 12px; border-width: 1.3px; border-color: #586174; border-radius: 2px; background: transparent; }
+    if root.kind == 1 && root.restored : Rectangle {
+        x: 14px; y: 9px; width: 11px; height: 11px; border-width: 1.2px; border-color: #586174; border-radius: 1px; background: transparent;
+        Rectangle { x: -3px; y: 3px; width: 11px; height: 11px; border-width: 1.2px; border-color: #586174; border-radius: 1px; background: hit.has-hover ? #e9ecf4 : #f8f9fc; }
+    }
+    if root.kind == 2 : Path { x: 13px; y: 10px; width: 12px; height: 12px; commands: "M 0 0 L 12 12 M 12 0 L 0 12"; stroke: hit.has-hover ? #ffffff : #586174; stroke-width: 1.5px; fill: transparent; }
+    if root.kind == 3 : Text { x: 0px; y: 0px; width: parent.width; height: parent.height; text: "···"; color: #687386; font-size: 19px; horizontal-alignment: center; vertical-alignment: center; }
+    hit := TouchArea { clicked => { root.clicked(); } }
+}
+
+export component AppWindow inherits Window {
+    title: root.loaded ? root.image-name + " — Image Feedback" : "Image Feedback";
+    preferred-width: 1280px;
+    preferred-height: 848px;
+    min-width: 1000px;
+    min-height: 688px;
+    in property <bool> native-chrome: false;
+    property <length> titlebar-height: root.native-chrome ? 0px : 44px;
+    property <length> more-button-space: root.native-chrome ? 48px : 0px;
+    no-frame: !root.native-chrome;
+    resize-border-width: root.native-chrome ? 0px : 6px;
+    icon: @image-url("../assets/app-icon.png");
+    background: #f5f6f8;
+    default-font-size: 13px;
+    forward-focus: canvasKeys;
+    init => { Palette.color-scheme = ColorScheme.light; }
+    in-out property <bool> space-held: false;
+    in-out property <bool> shift-held: false;
+    callback canvas-command(string);
+    changed space-held => { if root.space-held { root.canvas-command("leave"); } }
+    changed shift-held => { if root.shift-held { root.canvas-command("leave"); } }
+
+    in property <image> source-image;
+    in property <bool> loaded: false;
+    in property <string> image-name: "尚未导入图片";
+    in property <string> status-text: "准备就绪";
+    in property <bool> dirty: false;
+    in property <bool> can-undo: false;
+    in property <bool> can-redo: false;
+    in property <int> tool: 0;
+    in property <string> zoom-label: "100%";
+    in property <int> note-count: 0;
+    in property <[NoteRow]> notes;
+    in property <int> active-note-token: 0;
+    in property <[Mark]> marks;
+    in property <float> canvas-x: 0;
+    in property <float> canvas-y: 0;
+    in property <float> canvas-w: 0;
+    in property <float> canvas-h: 0;
+    in property <float> preview-x: 0;
+    in property <float> preview-y: 0;
+    in property <float> preview-w: 0;
+    in property <float> preview-h: 0;
+    in property <bool> preview-visible: false;
+    in property <bool> busy: false;
+    in property <bool> smart-enabled: true;
+    in property <string> smart-status: "智能预选 · 载入图片后准备";
+    in property <bool> hover-visible: false;
+    in property <image> hover-image;
+    in property <float> hover-x;
+    in property <float> hover-y;
+    in property <float> hover-w;
+    in property <float> hover-h;
+    callback toggle-smart();
+    out property <float> viewport-width: canvasClip.width / 1px;
+    out property <float> viewport-height: canvasClip.height / 1px;
+    out property <float> canvas-window-x: canvasTouch.absolute-position.x / 1px;
+    out property <float> canvas-window-y: canvasTouch.absolute-position.y / 1px;
+    out property <float> copy-button-center-x: (copyFeedback.absolute-position.x + copyFeedback.width / 2) / 1px;
+    out property <float> copy-button-center-y: (copyFeedback.absolute-position.y + copyFeedback.height / 2) / 1px;
+    out property <float> close-button-center-x: (closeWindow.absolute-position.x + closeWindow.width / 2) / 1px;
+    out property <float> close-button-center-y: (closeWindow.absolute-position.y + closeWindow.height / 2) / 1px;
+    in property <bool> delivery-ready: false;
+    out property <float> zoom-plus-center-x: (zoomPlus.absolute-position.x + zoomPlus.width / 2) / 1px;
+    out property <float> zoom-plus-center-y: (zoomPlus.absolute-position.y + zoomPlus.height / 2) / 1px;
+    out property <float> note-scroll-y: noteScroll.content-y / 1px;
+    out property <float> notes-viewport-height: noteScroll.visible-height / 1px;
+    out property <float> active-note-top: root.has-active-note ? root.active-note-state.top / 1px : -1;
+    out property <float> active-note-bottom: root.has-active-note ? root.active-note-state.bottom / 1px : -1;
+    out property <bool> active-note-visible: root.has-active-note && !root.confirm-visible
+        && root.active-note-top + root.note-scroll-y >= 0
+        && root.active-note-bottom + root.note-scroll-y <= root.notes-viewport-height;
+    out property <bool> active-editor-focused: root.has-active-note
+        && root.active-note-state.focused && !root.confirm-visible && !root.busy;
+
+    property <NoteViewState> active-note-state;
+    property <bool> has-active-note: root.active-note-token > 0
+        && root.active-note-state.token == root.active-note-token
+        && root.active-note-state.index >= 0 && root.active-note-state.index < root.notes.length
+        && root.notes[root.active-note-state.index].id == root.active-note-token
+        && root.notes[root.active-note-state.index].selected;
+    property <int> note-reveal-token: 0;
+    property <int> note-reveal-request: 0;
+    property <int> note-reveal-applied: 0;
+
+    // Consume explicit requests only, never force a scroll on normal model sync.
+    public function reveal-note(token: int) {
+        if token > 0 && token == root.active-note-token && !root.confirm-visible {
+            root.note-reveal-token = token;
+            root.note-reveal-request += 1;
+        }
+    }
+
+    function reveal-note-bounds(top: length, bottom: length) {
+        let offset = noteScroll.content-y;
+        let visible = noteScroll.visible-height;
+        let target = top + offset < 8px ? 8px - top
+            : (bottom + offset > visible - 8px ? visible - 8px - bottom : offset);
+        noteScroll.content-y = max(min(0px, visible - noteScroll.content-height), min(0px, target));
+    }
+    in property <bool> toast-visible: false;
+    in property <bool> toast-success: true;
+    in property <string> toast-title;
+    in property <string> toast-message;
+    in property <bool> copy-complete: false;
+    callback dismiss-toast();
+
+    in property <bool> confirm-visible: false;
+    in property <bool> confirm-saving: false;
+    in property <string> confirm-title;
+    in property <string> confirm-description;
+    in property <string> confirm-name;
+    in property <string> confirm-error;
+    in property <string> confirm-save-label: "保存并继续";
+    in property <string> confirm-discard-label: "不保存";
+    in property <string> confirm-cancel-label: "取消";
+    in property <bool> confirm-show-discard: true;
+    in property <bool> confirm-show-cancel: true;
+    in property <bool> confirm-destructive: false;
+    in property <string> confirm-footnote: "保存项目不会覆盖原图";
+    in-out property <int> confirm-choice: 2;
+    out property <bool> confirm-has-focus: confirmKeys.has-focus;
+    out property <float> confirm-cancel-x: (confirmCancel.absolute-position.x + confirmCancel.width / 2) / 1px;
+    out property <float> confirm-cancel-y: (confirmCancel.absolute-position.y + confirmCancel.height / 2) / 1px;
+    out property <float> confirm-discard-x: (confirmDiscard.absolute-position.x + confirmDiscard.width / 2) / 1px;
+    out property <float> confirm-discard-y: (confirmDiscard.absolute-position.y + confirmDiscard.height / 2) / 1px;
+    out property <float> confirm-save-x: (confirmSave.absolute-position.x + confirmSave.width / 2) / 1px;
+    out property <float> confirm-save-y: (confirmSave.absolute-position.y + confirmSave.height / 2) / 1px;
+    callback confirm-response(int);
+    changed confirm-visible => {
+        if root.confirm-visible {
+            helpMenu.close();
+            about.close();
+            root.space-held = false;
+            root.shift-held = false;
+            root.confirm-choice = 2;
+            confirmKeys.focus();
+        } else {
+            canvasKeys.focus();
+        }
+    }
+    changed confirm-saving => { if root.confirm-visible { confirmKeys.focus(); } }
+
+    callback import-image();
+    callback paste-image();
+    callback open-project();
+    callback save-project();
+    callback export-package();
+    callback copy-feedback();
+    callback copy-original-path();
+    callback copy-portable-data();
+    callback open-feedback-folder();
+    callback add-global();
+    callback load-example();
+    callback undo();
+    callback redo();
+    callback choose-tool(int);
+    callback fit-view();
+    callback zoom-by(float);
+    callback select-note(int);
+    callback remove-note(int);
+    callback note-edited(int, string);
+    callback note-edit-finished(int);
+    callback canvas-press(float, float, int);
+    callback canvas-move(float, float);
+    callback canvas-release(float, float);
+    callback canvas-wheel(float, float, float);
+    callback viewport-resized(float, float);
+
+    changed viewport-width => {
+        root.viewport-resized(root.viewport-width, root.viewport-height);
+    }
+    changed viewport-height => {
+        root.viewport-resized(root.viewport-width, root.viewport-height);
+    }
+
+    helpMenu := PopupWindow {
+        x: root.width - 230px; y: root.native-chrome ? 62px : 42px; width: 216px; height: 188px;
+        Rectangle { x: 0px; y: 0px; width: parent.width; height: parent.height; border-radius: 9px; border-width: 1px; border-color: #dfe3ed; background: #ffffff;
+            ActionButton { x: 7px; y: 8px; width: 182px; height: 40px; label: "复制原图路径"; quiet: true; enabled: root.loaded && !root.busy; clicked => { helpMenu.close(); root.copy-original-path(); } }
+            ActionButton { x: 7px; y: 52px; width: 202px; height: 40px; label: "复制 Base64 便携数据"; quiet: true; enabled: root.loaded && !root.busy; clicked => { helpMenu.close(); root.copy-portable-data(); } }
+            ActionButton { x: 7px; y: 96px; width: 202px; height: 40px; label: "打开最近反馈包"; quiet: true; enabled: root.delivery-ready && !root.busy; clicked => { helpMenu.close(); root.open-feedback-folder(); } }
+            ActionButton { x: 7px; y: 140px; width: 202px; height: 40px; label: "关于图片反馈"; quiet: true; clicked => { helpMenu.close(); about.show(); } }
+        }
+    }
+    about := PopupWindow {
+        x: (root.width - self.width) / 2;
+        y: (root.height - self.height) / 2;
+        width: 430px;
+        height: 285px;
+        Rectangle { x: 0px; y: 0px; width: parent.width; height: parent.height; border-width: 1px; border-color: #dfe3e9; border-radius: 10px; background: #ffffff; }
+        Text { x: 24px; y: 24px; width: 382px; height: 28px; text: "图片反馈 · Rust + Slint"; color: #253042; font-size: 20px; font-weight: 600; }
+        Text { x: 24px; y: 65px; width: 382px; height: 40px; text: "本地处理，不内置模型调用。\n应用原创代码与智能选区移植遵循 MIT。"; color: #687386; font-size: 12px; }
+        AboutSlint { x: 24px; y: 116px; width: 382px; height: 87px; }
+        ActionButton { x: 316px; y: 223px; width: 90px; label: "关闭"; clicked => { about.close(); } }
+    }
+
+    // Frameless, application-drawn title bar. WindowMoveArea and resize-border-width
+    // keep the operating system's drag/resize behavior without stock window chrome.
+    Rectangle {
+        visible: !root.native-chrome;
+        x: 0px; y: 0px; width: parent.width; height: root.titlebar-height; background: #f8f9fc;
+        WindowMoveArea {
+            x: 0px; y: 0px; width: parent.width - 182px; height: 44px;
+            TouchArea { double-clicked => { root.maximized = !root.maximized; } }
+        }
+        Image { x: 16px; y: 10px; width: 24px; height: 24px; source: @image-url("../assets/app-icon.png"); image-fit: contain; }
+        Text { x: 49px; y: 12px; width: 130px; height: 22px; text: "图片反馈"; font-size: 13px; font-weight: 600; color: #344055; }
+        Text { x: 190px; y: 12px; width: parent.width - 392px; height: 21px; visible: root.loaded; text: root.image-name; font-size: 12px; color: #838b9d; horizontal-alignment: center; overflow: elide; }
+        WindowButton { x: parent.width - 176px; y: 6px; kind: 3; description: "帮助菜单"; clicked => { helpMenu.show(); } }
+        WindowButton { x: parent.width - 132px; y: 6px; kind: 0; description: "最小化窗口"; clicked => { root.minimized = true; } }
+        WindowButton { x: parent.width - 88px; y: 6px; kind: 1; restored: root.maximized; description: root.maximized ? "还原窗口" : "最大化窗口"; clicked => { root.maximized = !root.maximized; } }
+        closeWindow := WindowButton { x: parent.width - 44px; y: 6px; kind: 2; description: "关闭窗口"; clicked => { root.close(); } }
+        Rectangle { x: 0px; y: 43px; width: parent.width; height: 1px; background: #e8ebf2; }
+    }
+    Rectangle {
+        x: 0px; y: root.titlebar-height; width: parent.width; height: 64px; background: #ffffff;
+        ActionButton { x: 24px; y: 14px; width: 105px; label: "＋ 导入图片"; enabled: !root.busy; clicked => { root.import-image(); } }
+        ActionButton { x: 140px; y: 14px; width: 82px; label: "打开项目"; quiet: true; enabled: !root.busy; clicked => { root.open-project(); } }
+        Rectangle { x: 236px; y: 20px; width: 1px; height: 24px; background: #e9ecf1; }
+        ActionButton { x: 250px; y: 14px; width: 42px; label: "撤销"; quiet: true; enabled: root.can-undo && !root.busy; clicked => { root.undo(); } }
+        ActionButton { x: 296px; y: 14px; width: 42px; label: "重做"; quiet: true; enabled: root.can-redo && !root.busy; clicked => { root.redo(); } }
+        Rectangle { x: 368px; y: 30px; width: 5px; height: 5px; border-radius: 3px; visible: root.dirty; background: #d2a05b; }
+        Text { x: 380px; y: 22px; width: parent.width - 680px - root.more-button-space; height: 21px; visible: root.dirty; text: "有未保存的修改"; color: #939baa; font-size: 11px; overflow: elide; }
+        ActionButton { x: parent.width - 276px - root.more-button-space; y: 14px; width: 112px; label: "保存项目"; enabled: root.loaded && !root.busy; clicked => { root.save-project(); } }
+        ActionButton { x: parent.width - 152px - root.more-button-space; y: 14px; width: 128px; label: "导出反馈包  ↗"; primary: true; enabled: root.loaded && !root.busy; clicked => { root.export-package(); } }
+        if root.native-chrome : WindowButton { x: parent.width - 60px; y: 16px; kind: 3; description: "更多菜单"; clicked => { helpMenu.show(); } }
+        Rectangle { x: 0px; y: 63px; width: parent.width; height: 1px; background: #e3e7ed; }
+    }
+
+    body := Rectangle {
+        y: root.titlebar-height + 64px;
+        width: parent.width;
+        height: parent.height - self.y;
+        background: #f1f3f6;
+
+        // A deliberately narrow tool rail; no editing controls overlap the image.
+        Rectangle {
+            x: 0px; y: 0px;
+            width: 72px;
+            height: parent.height;
+            background: #ffffff;
+            ToolButton {
+                x: 12px;
+                y: 16px;
+                icon: @image-url("../assets/icons/select.svg");
+                label: "选择";
+                active-state: root.tool == 0;
+                enabled: root.loaded && !root.busy;
+                clicked => { root.choose-tool(0); }
+            }
+            ToolButton {
+                x: 12px;
+                y: 91px;
+                icon: @image-url("../assets/icons/point.svg");
+                label: "点批注";
+                active-state: root.tool == 1;
+                enabled: root.loaded && !root.busy;
+                clicked => { root.choose-tool(1); }
+            }
+            ToolButton {
+                x: 12px;
+                y: 166px;
+                icon: @image-url("../assets/icons/pan.svg");
+                label: "平移";
+                active-state: root.tool == 2;
+                enabled: root.loaded && !root.busy;
+                clicked => { root.choose-tool(2); }
+            }
+            Rectangle { x: 22px; y: 247px; width: 28px; height: 1px; background: #e9ecf1; }
+            ToolButton {
+                x: 12px;
+                y: 262px;
+                icon: @image-url("../assets/icons/fit.svg");
+                label: "适应";
+                enabled: root.loaded && !root.busy;
+                clicked => { root.fit-view(); }
+            }
+            Rectangle { x: parent.width - 1px; width: 1px; height: parent.height; background: #e3e7ed; }
+        }
+
+        workspace := Rectangle {
+            x: 72px;
+            width: parent.width - 402px;
+            height: parent.height;
+            background: #eff1f5;
+            Rectangle {
+                x: 0px; y: 0px;
+                height: 46px;
+                width: parent.width;
+                background: #f8f9fb;
+                Text {
+                    x: 22px;
+                    y: 14px;
+                    width: 86px;
+                    height: 19px;
+                    text: "预览画布";
+                    color: #596476;
+                    font-size: 12px;
+                    font-weight: 600;
+                }
+                Text {
+                    x: 110px;
+                    y: 15px;
+                    width: parent.width - 262px;
+                    height: 18px;
+                    visible: root.busy;
+                    text: root.status-text;
+                    color: #98a0ac;
+                    font-size: 11px;
+                    overflow: elide;
+                }
+                ActionButton {
+                    x: parent.width - 136px;
+                    y: 8px;
+                    width: 121px;
+                    height: 30px;
+                    label: root.smart-enabled ? "智能预选  开" : "智能预选  关";
+                    enabled: !root.busy;
+                    clicked => { root.toggle-smart(); }
+                }
+                Rectangle { y: parent.height - 1px; width: parent.width; height: 1px; background: #e6e9ef; }
+            }
+
+            // Canvas geometry comes from Rust; floating zoom controls render above canvasTouch.
+            canvasClip := Rectangle {
+                y: 46px;
+                width: parent.width;
+                height: parent.height - 46px;
+                clip: true;
+                background: #edf0f4;
+
+                if root.loaded : Rectangle {
+                    x: root.canvas-x * 1px - 1px;
+                    y: root.canvas-y * 1px - 1px;
+                    width: root.canvas-w * 1px + 2px;
+                    height: root.canvas-h * 1px + 2px;
+                    background: #ffffff;
+                    border-width: 1px;
+                    border-color: #d6dce5;
+                }
+                if root.loaded : Image {
+                    x: root.canvas-x * 1px;
+                    y: root.canvas-y * 1px;
+                    width: root.canvas-w * 1px;
+                    height: root.canvas-h * 1px;
+                    source: root.source-image;
+                    image-fit: fill;
+                }
+
+                // All removed sources are covered before rendering destination blocks.
+                for mark in root.marks : Rectangle {
+                    visible: mark.is-block && !mark.is-point;
+                    x: (root.canvas-x + mark.source-x * root.canvas-w / max(1, root.source-image.width)) * 1px;
+                    y: (root.canvas-y + mark.source-y * root.canvas-h / max(1, root.source-image.height)) * 1px;
+                    width: mark.source-w * root.canvas-w / max(1, root.source-image.width) * 1px;
+                    height: mark.source-h * root.canvas-h / max(1, root.source-image.height) * 1px;
+                    background: #e5e6eb;
+                    border-color: #c8ced8;
+                    border-width: 1px;
+                }
+
+                for mark in root.marks : Rectangle {
+                    x: mark.x * 1px;
+                    y: mark.y * 1px;
+                    width: mark.is-point ? 0px : mark.w * 1px;
+                    height: mark.is-point ? 0px : mark.h * 1px;
+                    background: transparent;
+
+                    if !mark.is-point : Rectangle {
+                        width: parent.width;
+                        height: parent.height;
+                        background: mark.is-block ? #fefefe : (mark.selected ? #d94b4010 : #d94b4006);
+                        border-width: mark.selected ? 2px : 1px;
+                        border-color: #dc5147;
+                    }
+                    // Clip coordinates are pixels in source-image (the Rust-supplied preview image).
+                    // Slint 1.18.1 defines all four source-clip-* properties as integers.
+                    // Border and pin are separate and intentionally have no resize handles.
+                    if mark.is-block && !mark.is-point : Image {
+                        x: 2px;
+                        y: 2px;
+                        width: parent.width > 4px ? parent.width - 4px : 0px;
+                        height: parent.height > 4px ? parent.height - 4px : 0px;
+                        source: root.source-image;
+                        source-clip-x: round(mark.source-x);
+                        source-clip-y: round(mark.source-y);
+                        source-clip-width: round(mark.source-w);
+                        source-clip-height: round(mark.source-h);
+                        image-fit: fill;
+                    }
+                    Rectangle {
+                        x: -13px;
+                        y: -13px;
+                        width: 26px;
+                        height: 26px;
+                        border-radius: 13px;
+                        border-width: 2px;
+                        border-color: #ffffff;
+                        background: mark.selected ? #be352e : #dc5147;
+                        Text {
+                            width: parent.width;
+                            height: parent.height;
+                            text: mark.number;
+                            color: #ffffff;
+                            font-size: 12px;
+                            font-weight: 700;
+                            horizontal-alignment: center;
+                            vertical-alignment: center;
+                        }
+                    }
+                }
+                if root.hover-visible && !root.busy : Image {
+                    x: root.hover-x * 1px;
+                    y: root.hover-y * 1px;
+                    width: root.hover-w * 1px;
+                    height: root.hover-h * 1px;
+                    source: root.hover-image;
+                    image-fit: fill;
+                }
+                if root.preview-visible : Rectangle {
+                    x: root.preview-x * 1px;
+                    y: root.preview-y * 1px;
+                    width: root.preview-w * 1px;
+                    height: root.preview-h * 1px;
+                    border-width: 1px;
+                    border-color: #d94b40;
+                    background: #d94b4014;
+                }
+
+                canvasKeys := FocusScope {
+                    enabled: !root.confirm-visible;
+                    KeyBinding { keys: @keys(Control + S); enabled: root.loaded && !root.busy; activated => { root.save-project(); } }
+                    KeyBinding { keys: @keys(Control + V); enabled: !root.busy; activated => { root.paste-image(); } }
+                    KeyBinding { keys: @keys(Control + O); enabled: !root.busy; activated => { root.import-image(); } }
+                    KeyBinding { keys: @keys(Control + Z); enabled: root.can-undo && !root.busy; activated => { root.undo(); } }
+                    KeyBinding { keys: @keys(Control + Shift + Z); enabled: root.can-redo && !root.busy; activated => { root.redo(); } }
+                    KeyBinding { keys: @keys(V); activated => { root.choose-tool(0); } }
+                    KeyBinding { keys: @keys(P); activated => { root.choose-tool(1); } }
+                    KeyBinding { keys: @keys(H); activated => { root.choose-tool(2); } }
+                    KeyBinding { keys: @keys(F); activated => { root.fit-view(); } }
+                    key-pressed(event) => {
+                        root.shift-held = event.modifiers.shift;
+                        if event.text == " " { root.space-held = true; return accept; }
+                        if event.text == Key.Escape { root.canvas-command("cancel"); return accept; }
+                        if event.text == Key.Delete || event.text == Key.Backspace { root.canvas-command("delete"); return accept; }
+                        if event.text == Key.LeftArrow { root.canvas-command(event.modifiers.shift ? "left-fast" : "left"); return accept; }
+                        if event.text == Key.RightArrow { root.canvas-command(event.modifiers.shift ? "right-fast" : "right"); return accept; }
+                        if event.text == Key.UpArrow { root.canvas-command(event.modifiers.shift ? "up-fast" : "up"); return accept; }
+                        if event.text == Key.DownArrow { root.canvas-command(event.modifiers.shift ? "down-fast" : "down"); return accept; }
+                        return reject;
+                    }
+                    key-released(event) => {
+                        root.shift-held = event.modifiers.shift;
+                        if event.text == " " { root.space-held = false; return accept; }
+                        return reject;
+                    }
+                    canvasTouch := TouchArea {
+                        enabled: root.loaded && !root.busy;
+                        changed has-hover => { if !self.has-hover { root.canvas-command("leave"); } }
+                        pointer-event(event) => {
+                            if event.kind == PointerEventKind.down {
+                                canvasKeys.focus();
+                                root.canvas-press(self.mouse-x / 1px, self.mouse-y / 1px,
+                                    event.button == PointerEventButton.left ? 0 : (event.button == PointerEventButton.right ? 1 : 2));
+                            } else if event.kind == PointerEventKind.up {
+                                root.canvas-release(self.mouse-x / 1px, self.mouse-y / 1px);
+                            } else if event.kind == PointerEventKind.cancel {
+                                root.canvas-command("cancel");
+                            } else if event.kind == PointerEventKind.move {
+                                // moved() is pressed-only in Slint. Forward all pointer moves
+                                // here so unpressed hovering and dragging use one event path.
+                                root.canvas-move(self.mouse-x / 1px, self.mouse-y / 1px);
+                            }
+                        }
+                        scroll-event(event) => {
+                            root.canvas-wheel(event.delta-y / 1px, self.mouse-x / 1px, self.mouse-y / 1px);
+                            return EventResult.accept;
+                        }
+                    }
+                }
+
+                if !root.loaded : Rectangle {
+                    x: (parent.width - 490px) / 2;
+                    y: (parent.height - self.height) / 2;
+                    width: 490px;
+                    height: 306px;
+                    background: transparent;
+                    Rectangle {
+                        x: 207px;
+                        y: 16px;
+                        width: 76px;
+                        height: 66px;
+                        border-radius: 11px;
+                        border-width: 2px;
+                        border-color: #bfc8d5;
+                        background: #f9fafc;
+                        Rectangle { x: 16px; y: 20px; width: 34px; height: 3px; border-radius: 2px; background: #d1d8e2; }
+                        Rectangle { x: 16px; y: 30px; width: 43px; height: 3px; border-radius: 2px; background: #d1d8e2; }
+                        Rectangle { x: 16px; y: 40px; width: 25px; height: 3px; border-radius: 2px; background: #d1d8e2; }
+                        Rectangle {
+                            x: 55px;
+                            y: 43px;
+                            width: 28px;
+                            height: 28px;
+                            border-radius: 14px;
+                            border-width: 3px;
+                            border-color: #edf0f4;
+                            background: #d94b40;
+                            Text {
+                                width: parent.width;
+                                height: parent.height;
+                                text: "1";
+                                color: #ffffff;
+                                font-size: 12px;
+                                font-weight: 700;
+                                horizontal-alignment: center;
+                                vertical-alignment: center;
+                            }
+                        }
+                    }
+                    Text {
+                        y: 113px;
+                        width: parent.width;
+                        height: 42px;
+                        text: "把修改意见，放回画面。";
+                        color: #354054;
+                        font-size: 28px;
+                        font-weight: 700;
+                        horizontal-alignment: center;
+                    }
+                    Text {
+                        y: 167px;
+                        width: parent.width;
+                        height: 48px;
+                        text: "拖动选择画面区域，直接写下批注。\n也可以标记一个点，让修改意见更准确。";
+                        color: #8791a1;
+                        font-size: 13px;
+                        horizontal-alignment: center;
+                    }
+                    ActionButton {
+                        x: 55px;
+                        y: 241px;
+                        width: 132px;
+                        height: 40px;
+                        label: "＋ 导入图片";
+                        primary: true;
+                        enabled: !root.busy;
+                        clicked => { root.import-image(); }
+                    }
+                    ActionButton {
+                        x: 199px;
+                        y: 241px;
+                        width: 102px;
+                        height: 40px;
+                        label: "粘贴图片";
+                        enabled: !root.busy;
+                        clicked => { root.paste-image(); }
+                    }
+                    ActionButton {
+                        x: 313px;
+                        y: 241px;
+                        width: 122px;
+                        height: 40px;
+                        label: "打开示例";
+                        enabled: !root.busy;
+                        clicked => { root.load-example(); }
+                    }
+                }
+
+                // Controls and their hit region stop click/scroll penetration to the canvas.
+                Rectangle {
+                    x: parent.width - self.width - 16px;
+                    y: parent.height - self.height - 16px;
+                    width: 208px; height: 38px;
+                    visible: root.loaded;
+                    border-radius: 9px;
+                    border-width: 1px; border-color: #dce2eb; background: #ffffff;
+                    TouchArea {
+                        enabled: root.loaded;
+                        scroll-event(event) => { return accept; }
+                    }
+                    ActionButton {
+                        x: 4px; y: 4px; width: 30px; height: 30px; label: "−"; quiet: true;
+                        enabled: root.loaded && !root.busy;
+                        clicked => { root.zoom-by(0.8); }
+                    }
+                    Text {
+                        x: 38px; y: 4px; width: 60px; height: 30px;
+                        text: root.zoom-label; color: #667185; font-size: 11px;
+                        horizontal-alignment: center; vertical-alignment: center;
+                    }
+                    zoomPlus := ActionButton {
+                        x: 102px; y: 4px; width: 30px; height: 30px; label: "＋"; quiet: true;
+                        enabled: root.loaded && !root.busy;
+                        clicked => { root.zoom-by(1.25); }
+                    }
+                    Rectangle { x: 140px; y: 11px; width: 1px; height: 16px; background: #e5e9ee; }
+                    ActionButton {
+                        x: 148px; y: 4px; width: 56px; height: 30px; label: "适应"; quiet: true;
+                        enabled: root.loaded && !root.busy;
+                        clicked => { root.fit-view(); }
+                    }
+                }
+
+                if root.busy : Rectangle {
+                    width: parent.width;
+                    height: parent.height;
+                    background: #edf0f4b8;
+                    TouchArea { }
+                    Rectangle {
+                        x: (parent.width - 168px) / 2;
+                        y: (parent.height - 56px) / 2;
+                        width: 168px;
+                        height: 56px;
+                        border-radius: 10px;
+                        border-width: 1px;
+                        border-color: #dfe4eb;
+                        background: #ffffff;
+                        Text {
+                            width: parent.width;
+                            height: parent.height;
+                            text: "正在处理，请稍候…";
+                            color: #667185;
+                            font-size: 13px;
+                            horizontal-alignment: center;
+                            vertical-alignment: center;
+                        }
+                    }
+                }
+            }
+        }
+
+        // Right panel stays exactly 330 logical pixels wide.
+        sidebar := Rectangle {
+            x: parent.width - 330px;
+            width: 330px;
+            height: parent.height;
+            background: #ffffff;
+            Rectangle { x: 0px; y: 0px; width: 1px; height: parent.height; background: #e0e5ec; }
+            Text {
+                x: 21px;
+                y: 20px;
+                width: 48px;
+                height: 28px;
+                text: "批注";
+                color: #2d384a;
+                font-size: 20px;
+                font-weight: 700;
+            }
+            Rectangle {
+                x: 75px;
+                y: 23px;
+                width: 30px;
+                height: 23px;
+                border-radius: 12px;
+                background: #f0f2f6;
+                Text {
+                    width: parent.width;
+                    height: parent.height;
+                    text: root.note-count;
+                    color: #7b8595;
+                    font-size: 11px;
+                    horizontal-alignment: center;
+                    vertical-alignment: center;
+                }
+            }
+            ActionButton {
+                x: 20px;
+                y: 60px;
+                width: 290px;
+                height: 34px;
+                label: "＋ 添加整体意见";
+                enabled: root.loaded && !root.busy;
+                clicked => { root.add-global(); }
+            }
+            Rectangle { x: 20px; y: 108px; width: 290px; height: 1px; background: #edf0f4; }
+
+            noteScroll := ScrollView {
+                x: 12px;
+                y: 120px;
+                width: 306px;
+                height: parent.height - 196px;
+                content-width: self.width - 12px;
+                noteList := VerticalLayout {
+                    spacing: 10px;
+                    padding: 3px;
+                    for note[index] in root.notes : noteCard := Rectangle {
+                        property <bool> editor-focused: false;
+                        property <NoteViewState> view-state: {
+                            token: note.id, index: index,
+                            top: noteList.y + self.y, bottom: noteList.y + self.y + self.height,
+                            focused: self.editor-focused,
+                            active: note.selected && note.id == root.active-note-token,
+                        };
+                        property <int> reveal-request: root.note-reveal-request;
+
+                        function publish-state() {
+                            if self.view-state.active { root.active-note-state = self.view-state; }
+                        }
+                        function reveal-pending() {
+                            if self.view-state.active && root.note-reveal-token == note.id
+                                && root.note-reveal-request != root.note-reveal-applied
+                                && !root.confirm-visible && self.y >= 3px {
+                                root.reveal-note-bounds(self.view-state.top, self.view-state.bottom);
+                                root.note-reveal-applied = root.note-reveal-request;
+                            }
+                        }
+                        init => { self.publish-state(); self.reveal-pending(); }
+                        changed view-state => { self.publish-state(); self.reveal-pending(); }
+                        changed reveal-request => { self.reveal-pending(); }
+                        height: note.selected ? 238px : 140px;
+                        border-radius: 9px;
+                        border-width: 1px;
+                        border-color: note.selected ? #c2c6f2 : #e5e9ef;
+                        background: note.selected ? #f9faff : #ffffff;
+                        TouchArea {
+                            enabled: !root.busy;
+                            clicked => { root.select-note(note.id); }
+                        }
+                        Rectangle {
+                            x: 13px;
+                            y: 14px;
+                            width: 25px;
+                            height: 25px;
+                            border-radius: 13px;
+                            background: #db5147;
+                            Text {
+                                width: parent.width;
+                                height: parent.height;
+                                text: note.number;
+                                color: #ffffff;
+                                font-size: 11px;
+                                font-weight: 700;
+                                horizontal-alignment: center;
+                                vertical-alignment: center;
+                            }
+                        }
+                        Text {
+                            x: 48px;
+                            y: 17px;
+                            width: parent.width - 114px;
+                            height: 20px;
+                            text: note.kind-label;
+                            color: #465166;
+                            font-size: 12px;
+                            font-weight: 600;
+                            overflow: elide;
+                        }
+                        if note.selected : Text {
+                            x: parent.width - 59px;
+                            y: 19px;
+                            width: 44px;
+                            height: 17px;
+                            text: "编辑中";
+                            color: #7278bf;
+                            font-size: 10px;
+                            horizontal-alignment: right;
+                        }
+                        Text {
+                            x: 14px;
+                            y: 47px;
+                            width: parent.width - 28px;
+                            height: 18px;
+                            text: note.detail;
+                            color: #a0a7b2;
+                            font-size: 10px;
+                            overflow: elide;
+                        }
+                        if !note.selected : Text {
+                            x: 14px;
+                            y: 76px;
+                            width: parent.width - 28px;
+                            height: 49px;
+                            text: note.text == "" ? "点击写下这处的修改意见…" : note.text;
+                            color: note.text == "" ? #a3aab5 : #687386;
+                            font-size: 12px;
+                            wrap: word-wrap;
+                            overflow: elide;
+                        }
+                        if note.selected : TextEdit {
+                            x: 13px;
+                            y: 75px;
+                            width: parent.width - 26px;
+                            height: 112px;
+                            text: note.text;
+                            enabled: !root.busy && !root.confirm-visible;
+                            placeholder-text: "写下这处的修改意见…";
+                            property <bool> was-focused: false;
+                            property <int> focus-request: root.note-reveal-applied;
+                            changed focus-request => {
+                                if note.id == root.active-note-token && note.id == root.note-reveal-token && !root.confirm-visible && !root.busy { self.focus(); }
+                            }
+                            init => {
+                                noteCard.editor-focused = self.has-focus;
+                                if !root.confirm-visible { self.focus(); }
+                            }
+                            changed has-focus => {
+                                noteCard.editor-focused = self.has-focus;
+                                if self.has-focus { self.was-focused = true; }
+                                else if self.was-focused && !root.confirm-visible { root.note-edit-finished(note.id); }
+                            }
+                            edited => { root.note-edited(note.id, self.text); }
+                            key-pressed(event) => {
+                                if root.confirm-visible { return accept; }
+                                if event.text == Key.Escape { root.canvas-command("cancel-text"); canvasKeys.focus(); return accept; }
+                                if event.modifiers.control && event.text == Key.Return { root.canvas-command("finish-text"); canvasKeys.focus(); return accept; }
+                                return reject;
+                            }
+                        }
+                        if note.selected : ActionButton {
+                            x: 11px;
+                            y: 200px;
+                            width: 48px;
+                            height: 27px;
+                            label: "删除";
+                            quiet: true;
+                            destructive: true;
+                            enabled: !root.busy;
+                            clicked => { root.remove-note(note.id); }
+                        }
+                        if note.selected : ActionButton {
+                            x: parent.width - 73px;
+                            y: 199px;
+                            width: 60px;
+                            height: 28px;
+                            label: "完成";
+                            enabled: !root.busy;
+                            clicked => { root.canvas-command("finish-text"); canvasKeys.focus(); }
+                        }
+                    }
+                }
+            }
+            if root.note-count == 0 : Rectangle {
+                x: 26px;
+                y: noteScroll.y + 24px;
+                width: 278px;
+                height: 164px;
+                background: transparent;
+                Text {
+                    y: 3px;
+                    width: parent.width;
+                    height: 34px;
+                    text: "＋";
+                    color: #cad1dc;
+                    font-size: 31px;
+                    horizontal-alignment: center;
+                }
+                Text {
+                    y: 52px;
+                    width: parent.width;
+                    height: 24px;
+                    text: "还没有批注";
+                    color: #8b95a4;
+                    font-size: 13px;
+                    horizontal-alignment: center;
+                }
+                Text {
+                    y: 83px;
+                    width: parent.width;
+                    height: 43px;
+                    text: "在画面中拖动框选或添加标记，\n你的修改意见会出现在这里。";
+                    color: #a8afba;
+                    font-size: 11px;
+                    horizontal-alignment: center;
+                }
+            }
+            Rectangle {
+                x: 1px;
+                y: parent.height - 64px;
+                width: parent.width - 1px;
+                height: 64px;
+                background: #ffffff;
+                copyFeedback := ActionButton {
+                    x: 20px;
+                    y: 14px;
+                    width: 290px;
+                    height: 36px;
+                    label: root.copy-complete ? "已复制" : "复制反馈说明";
+                    enabled: root.loaded && root.note-count > 0 && !root.busy;
+                    clicked => { root.copy-feedback(); }
+                }
+                if copyFeedback.hovered && !root.confirm-visible : Rectangle {
+                    x: 20px; y: -58px; width: 290px; height: 64px;
+                    border-radius: 8px; border-width: 1px; border-color: #dfe3ed;
+                    background: #ffffff;
+                    Text {
+                        x: 12px; y: 11px; width: parent.width - 24px; height: 42px;
+                        text: "复制原图路径和精简修改建议。\n跨设备请另附原图或反馈包。";
+                        color: #687386; font-size: 12px; wrap: word-wrap;
+                    }
+                }
+            }
+        }
+    }
+
+    // Non-modal, explicit copy acknowledgement; no permanent refresh timer.
+    if root.toast-visible : Rectangle {
+        x: (root.width - self.width) / 2;
+        y: root.height - 142px;
+        width: min(440px, root.width - 40px);
+        height: 88px;
+        border-radius: 11px;
+        border-width: 1px;
+        border-color: root.toast-success ? #b8d9c7 : #edc0c7;
+        background: #ffffff;
+        Rectangle { x: 16px; y: 17px; width: 28px; height: 28px; border-radius: 14px; background: root.toast-success ? #e4f3ea : #fbe9ec;
+            if root.toast-success : Path { x: 8px; y: 9px; width: 12px; height: 10px; commands: "M 0 5 L 4 9 L 12 0"; stroke: #258557; stroke-width: 1.8px; fill: transparent; }
+            if !root.toast-success : Text { x: 0px; y: 0px; width: parent.width; height: parent.height; text: "!"; color: #c34759; font-size: 16px; font-weight: 600; horizontal-alignment: center; vertical-alignment: center; }
+        }
+        Text { x: 55px; y: 14px; width: parent.width - 92px; height: 24px; text: root.toast-title; color: #29384b; font-size: 14px; font-weight: 600; }
+        Text { x: 55px; y: 40px; width: parent.width - 75px; height: 35px; text: root.toast-message; color: #7b8595; font-size: 11px; wrap: word-wrap; overflow: elide; }
+        Text { x: parent.width - 29px; y: 12px; width: 18px; height: 18px; text: "×"; color: #9ba3b1; font-size: 15px; horizontal-alignment: center; vertical-alignment: center;
+            TouchArea { clicked => { root.dismiss-toast(); } }
+        }
+    }
+    Rectangle { x: 0px; y: 0px; width: parent.width; height: parent.height; background: transparent; border-color: #dfe3eb; border-width: 1px; }
+
+    // Keep this layer and its FocusScope instantiated: visibility and enabled gate
+    // all input while preserving stable IDs for focus transitions and UI tests.
+    confirmOverlay := Rectangle {
+        x: 0px; y: 0px;
+        width: root.width; height: root.height;
+        visible: root.confirm-visible;
+        background: #17213c77;
+        TouchArea {
+            enabled: root.confirm-visible;
+            pointer-event(event) => { if event.kind == PointerEventKind.down { confirmKeys.focus(); } }
+            scroll-event(event) => { return accept; }
+        }
+        confirmKeys := FocusScope {
+            x: 0px; y: 0px; width: parent.width; height: parent.height;
+            enabled: root.confirm-visible;
+            capture-key-pressed(event) => {
+                if root.confirm-saving { return accept; }
+                if event.text == Key.Escape { root.confirm-response(0); return accept; }
+                if event.text == Key.Return {
+                    root.confirm-response(root.confirm-choice == 0 && root.confirm-show-cancel ? 0 : (root.confirm-choice == 1 && root.confirm-show-discard ? 1 : 2));
+                    return accept;
+                }
+                if event.text == Key.Tab || event.text == Key.Backtab || event.text == Key.LeftArrow || event.text == Key.RightArrow {
+                    if event.text == Key.LeftArrow || event.text == Key.Backtab || (event.text == Key.Tab && event.modifiers.shift) {
+                        root.confirm-choice = root.confirm-choice == 2 ? (root.confirm-show-discard ? 1 : (root.confirm-show-cancel ? 0 : 2)) : (root.confirm-choice == 1 && root.confirm-show-cancel ? 0 : 2);
+                    } else {
+                        root.confirm-choice = root.confirm-choice == 0 ? (root.confirm-show-discard ? 1 : 2) : (root.confirm-choice == 1 ? 2 : (root.confirm-show-cancel ? 0 : (root.confirm-show-discard ? 1 : 2)));
+                    }
+                    return accept;
+                }
+                // Do not leak Delete, Space, letters, or modified shortcuts to the canvas.
+                return accept;
+            }
+            capture-key-released(event) => { return accept; }
+            confirmCard := Rectangle {
+                x: (parent.width - self.width) / 2;
+                y: (parent.height - self.height) / 2;
+                width: 520px;
+                height: (root.confirm-name == "" ? 292px : 326px) + (root.confirm-error == "" ? 0px : 66px);
+                background: transparent;
+                Rectangle { x: -2px; y: 9px; width: parent.width + 4px; height: parent.height + 4px; border-radius: 19px; background: #101b3b15; }
+                Rectangle { x: 0px; y: 0px; width: parent.width; height: parent.height; border-radius: 17px; border-width: 1px; border-color: #e3e6f0; background: #ffffff; }
+                accessible-role: groupbox;
+                accessible-label: root.confirm-title;
+
+                // Original save/feedback symbol, built from vectors rather than font glyphs.
+                Rectangle {
+                    x: 28px; y: 28px; width: 52px; height: 52px;
+                    border-radius: 15px; background: root.confirm-destructive ? #fff0f2 : #eff0ff;
+                    if root.confirm-destructive : Path { x: 13px; y: 13px; width: 26px; height: 25px; commands: "M 13 1 L 25 23 H 1 Z M 13 8 V 15 M 13 19 V 20"; stroke: #d45a6a; stroke-width: 1.8px; fill: transparent; }
+                    if !root.confirm-destructive && root.confirm-show-discard : Path { x: 14px; y: 12px; width: 25px; height: 28px; commands: "M 2 1 H 19 L 25 7 V 27 H 2 Z M 8 1 V 10 H 19 V 1 M 8 18 H 19 V 27 H 8 Z"; stroke: #5b62d5; stroke-width: 1.7px; fill: transparent; }
+                    if !root.confirm-destructive && !root.confirm-show-discard : Rectangle {
+                        x: 14px; y: 14px; width: 24px; height: 24px; border-radius: 12px; border-width: 1.7px; border-color: #5b62d5; background: transparent;
+                        Rectangle { x: 10px; y: 6px; width: 3px; height: 3px; border-radius: 1.5px; background: #5b62d5; }
+                        Rectangle { x: 10.5px; y: 11px; width: 2px; height: 7px; border-radius: 1px; background: #5b62d5; }
+                    }
+                    Rectangle { x: 38px; y: 3px; width: 10px; height: 10px; border-radius: 5px; border-width: 2px; border-color: #ffffff; background: #ff8074; }
+                }
+                Text { x: 97px; y: 30px; width: 352px; height: 30px; text: root.confirm-title == "" ? "保存本次修改？" : root.confirm-title; color: #2a354b; font-size: 20px; font-weight: 600; overflow: elide; }
+                ScrollView {
+                    x: 97px; y: 67px; width: 365px; height: root.confirm-name == "" ? 91px : 42px;
+                    content-width: self.width - 14px;
+                    VerticalLayout {
+                        Text { text: root.confirm-description; color: #8790a2; font-size: 12px; wrap: word-wrap; }
+                    }
+                }
+                Rectangle {
+                    x: parent.width - 45px; y: 16px; width: 29px; height: 29px;
+                    border-radius: 8px; background: confirmCloseHit.has-hover && !root.confirm-saving ? #f1f3f8 : transparent;
+                    opacity: root.confirm-saving ? 0.35 : 1;
+                    Path { x: 10px; y: 10px; width: 9px; height: 9px; commands: "M 0 0 L 9 9 M 9 0 L 0 9"; stroke: #8c95a7; stroke-width: 1.5px; fill: transparent; }
+                    confirmCloseHit := TouchArea {
+                        enabled: root.confirm-visible && !root.confirm-saving;
+                        clicked => { confirmKeys.focus(); root.confirm-response(0); }
+                    }
+                }
+                Rectangle {
+                    x: 28px; y: 124px; width: parent.width - 56px; height: 64px;
+                    visible: root.confirm-name != "";
+                    border-radius: 10px; border-width: 1px; border-color: #e9ebf3; background: #f7f8fc;
+                    Path { x: 17px; y: 18px; width: 21px; height: 27px; commands: "M 2 1 H 14 L 21 8 V 26 H 2 Z M 14 1 V 8 H 21 M 7 14 H 16 M 7 19 H 16"; stroke: #959eb2; stroke-width: 1.3px; fill: transparent; }
+                    Text { x: 54px; y: 12px; width: parent.width - 71px; height: 22px; text: root.confirm-name == "" ? "未命名反馈项目" : root.confirm-name; color: #4b5770; font-size: 13px; font-weight: 500; overflow: elide; }
+                    Text { x: 54px; y: 36px; width: parent.width - 71px; height: 17px; text: root.confirm-saving ? "正在处理，请稍候。" : (root.confirm-show-discard ? "图片与批注保存在同一个项目中" : "当前操作对象"); color: #99a2b4; font-size: 10px; }
+                }
+                Text {
+                    x: 29px; y: root.confirm-name == "" ? 170px : 204px; width: parent.width - 58px; height: 24px;
+                    visible: root.confirm-error == "" && (root.confirm-saving || root.confirm-footnote != "");
+                    text: root.confirm-saving ? "请保持窗口开启，直到处理完成。" : root.confirm-footnote;
+                    color: #929bab; font-size: 11px;
+                }
+                Rectangle {
+                    x: 28px; y: root.confirm-name == "" ? 168px : 202px; width: parent.width - 56px; height: 88px;
+                    visible: root.confirm-error != "";
+                    border-radius: 9px; border-width: 1px; border-color: #f0d5d8; background: #fff6f7;
+                    Text { x: 13px; y: 10px; width: parent.width - 26px; height: 19px; text: "操作未完成"; color: #b55765; font-size: 11px; font-weight: 600; }
+                    ScrollView {
+                        x: 11px; y: 32px; width: parent.width - 22px; height: 45px;
+                        content-width: self.width - 12px;
+                        VerticalLayout {
+                            Text { text: root.confirm-error; color: #9e6873; font-size: 11px; wrap: word-wrap; }
+                        }
+                    }
+                }
+                Rectangle { x: 28px; y: parent.height - 86px; width: parent.width - 56px; height: 1px; background: #eef0f5; }
+                Text { x: 29px; y: parent.height - 52px; width: 96px; height: 18px; text: root.confirm-saving ? "请稍候" : (root.confirm-show-cancel ? "Esc 取消" : "Enter 继续"); color: #a8afbd; font-size: 10px; }
+                confirmCancel := ActionButton {
+                    x: parent.width - (root.confirm-show-discard ? 386px : 276px); y: parent.height - 66px; width: 84px; height: 40px;
+                    label: root.confirm-cancel-label;
+                    visible: root.confirm-show-cancel;
+                    enabled: root.confirm-visible && root.confirm-show-cancel && !root.confirm-saving;
+                    focus-ring: confirmKeys.has-focus && root.confirm-choice == 0 && !root.confirm-saving;
+                    clicked => { root.confirm-choice = 0; confirmKeys.focus(); root.confirm-response(0); }
+                }
+                confirmDiscard := ActionButton {
+                    x: parent.width - 292px; y: parent.height - 66px; width: 100px; height: 40px;
+                    label: root.confirm-discard-label; destructive: true;
+                    visible: root.confirm-show-discard;
+                    enabled: root.confirm-visible && root.confirm-show-discard && !root.confirm-saving;
+                    focus-ring: confirmKeys.has-focus && root.confirm-choice == 1 && !root.confirm-saving;
+                    clicked => { root.confirm-choice = 1; confirmKeys.focus(); root.confirm-response(1); }
+                }
+                confirmSave := ActionButton {
+                    x: parent.width - 182px; y: parent.height - 66px; width: 154px; height: 40px;
+                    label: root.confirm-saving ? "正在保存" : root.confirm-save-label;
+                    primary: true;
+                    destructive: root.confirm-destructive;
+                    enabled: root.confirm-visible && !root.confirm-saving;
+                    focus-ring: confirmKeys.has-focus && root.confirm-choice == 2 && !root.confirm-saving;
+                    clicked => { root.confirm-choice = 2; confirmKeys.focus(); root.confirm-response(2); }
+                }
+            }
+        }
+    }
+}
