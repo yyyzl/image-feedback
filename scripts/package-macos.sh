@@ -20,7 +20,7 @@ for TARGET in aarch64-apple-darwin x86_64-apple-darwin; do
 done
 xcrun lipo -create target/aarch64-apple-darwin/release/image-feedback-slint target/x86_64-apple-darwin/release/image-feedback-slint -output "$BINARY"
 chmod 755 "$BINARY"
-xcrun lipo -verify_arch arm64 x86_64 "$BINARY"
+xcrun lipo "$BINARY" -verify_arch arm64 x86_64
 for SIZE in 16 32 128 256 512; do
   sips -z "$SIZE" "$SIZE" assets/app-icon.png --out "$ICONSET/icon_${SIZE}x${SIZE}.png" >/dev/null
   DOUBLE=$((SIZE * 2))
