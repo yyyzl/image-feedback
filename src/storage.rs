@@ -5,6 +5,7 @@ use serde::Serialize;
 use std::fs::{self, File};
 use std::io::{Cursor, Read, Write};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 use zip::{ZipArchive, ZipWriter, write::SimpleFileOptions};
 
@@ -111,13 +112,19 @@ impl Asset {
 }
 
 fn unique_suffix() -> String {
+    unique_suffix_at(SystemTime::now())
+}
+fn unique_suffix_at(now: SystemTime) -> String {
+    // Wall-clock resolution is not uniqueness, especially in parallel Windows tests.
+    // PID separates concurrent processes; the counter separates calls within one process.
+    static SEQUENCE: AtomicU64 = AtomicU64::new(0);
     format!(
-        "{}-{}",
+        "{}-{}-{}",
         std::process::id(),
-        SystemTime::now()
-            .duration_since(UNIX_EPOCH)
+        now.duration_since(UNIX_EPOCH)
             .unwrap_or_default()
-            .as_nanos()
+            .as_nanos(),
+        SEQUENCE.fetch_add(1, Ordering::Relaxed)
     )
 }
 
@@ -469,6 +476,25 @@ pub fn export_package(parent: &Path, doc: &Document, asset: &Asset) -> Result<Pa
 mod tests {
     use super::*;
     use crate::document::Point;
+
+    #[test]
+    fn suffixes_remain_unique_across_threads_when_the_clock_does_not_advance() {
+        let workers: Vec<_> = (0..8)
+            .map(|_| {
+                std::thread::spawn(|| {
+                    (0..1000)
+                        .map(|_| unique_suffix_at(UNIX_EPOCH))
+                        .collect::<Vec<_>>()
+                })
+            })
+            .collect();
+        let suffixes: std::collections::HashSet<_> = workers
+            .into_iter()
+            .flat_map(|worker| worker.join().unwrap())
+            .collect();
+        assert_eq!(suffixes.len(), 8000);
+    }
+
     fn asset() -> Asset {
         Asset::from_rgba(
             RgbaImage::from_pixel(80, 60, Rgba([30, 80, 140, 255])),

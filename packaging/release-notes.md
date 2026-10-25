@@ -8,6 +8,7 @@ Native, local-first image feedback editor for Windows and macOS.
 - Dock, Applications and Windows icons retain the original full-color artwork.
 - Verify the actual menu-bar image template flag on both Apple Silicon and Intel.
 - Window regressions wait for image loading and analysis readiness with a bounded timeout, rather than failing solely because a CI machine needs more than two seconds to start.
+- Add an atomic sequence to temporary/export names, preventing same-process collisions when the Windows clock returns identical timestamps; verified with a fixed-clock multithreaded regression.
 
 ## Install
 
