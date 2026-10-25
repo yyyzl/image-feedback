@@ -1,0 +1,7 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="22" height="22" viewBox="0 0 22 22">
+  <!-- Original menu-bar optical variant of Image Feedback. Alpha-only template;
+       macOS supplies the visible tint. No tile, accent color, or background. -->
+  <path d="M13.25 3.75 H5.25 Q3.25 3.75 3.25 5.75 V14.25 Q3.25 16.25 5.25 16.25 H7.25 V19 L10.75 16.25 H16.75 Q18.75 16.25 18.75 14.25 V10.25" fill="none" stroke="#000000" stroke-width="1.65" stroke-linecap="round" stroke-linejoin="round"/>
+  <path d="M6.25 12.5 L9.25 9.25 L12.25 12.5 L14.25 10.5 L16 12.5" fill="none" stroke="#000000" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
+  <circle cx="17.5" cy="5.25" r="2" fill="#000000"/>
+</svg>
