@@ -29,6 +29,15 @@ xcrun lipo "$BIN" -verify_arch arm64 x86_64
 codesign --verify --deep --strict "$APP"
 cd "$WORK"
 "$BIN" --version
+# Read NSImage.isTemplate from an actual native status item, not just builder config.
+"$BIN" --tray-only --tray-smoke "$OUTPUT/tray"
+python3 - "$OUTPUT/tray/tray-report.json" <<'PY'
+import json,sys
+report=json.load(open(sys.argv[1]))
+assert report["result"]=="passed",report
+assert report["native_template_checked"] and report["template_expected"],report
+assert report["pixel_dimensions"]==[36,36],report
+PY
 for MODE in smoke-test delivery-smoke dialog-smoke; do
   DIR="$OUTPUT/$MODE"
   SLINT_BACKEND=winit-software "$BIN" --editor "--$MODE" "$DIR"
@@ -51,6 +60,6 @@ wait "$TRAY_PID" || true
 python3 - "$OUTPUT" <<'PY'
 import json,pathlib,platform,sys
 out=pathlib.Path(sys.argv[1])
-(out/'installation-report.json').write_text(json.dumps({'result':'passed','host_arch':platform.machine(),'universal_slices':['arm64','x86_64'],'dmg_detached_before_launch':True,'native_chrome_checked_by_smoke':True,'appkit_quit_guard_checked_by_smoke':True,'normal_resident_and_editor_launch':True,'signing':'ad-hoc; not Apple-notarized','limitations':'Scene events, not physical traffic-light clicks or Gatekeeper approval.'},indent=2))
+(out/'installation-report.json').write_text(json.dumps({'result':'passed','host_arch':platform.machine(),'universal_slices':['arm64','x86_64'],'dmg_detached_before_launch':True,'native_chrome_checked_by_smoke':True,'appkit_quit_guard_checked_by_smoke':True,'native_menu_bar_template_checked':True,'normal_resident_and_editor_launch':True,'signing':'ad-hoc; not Apple-notarized','limitations':'Scene events, not physical traffic-light clicks or Gatekeeper approval.'},indent=2))
 PY
 echo 'Copied .app runs after DMG detach, outside the build tree.'
