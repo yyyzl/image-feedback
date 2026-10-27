@@ -214,20 +214,24 @@ fn append_annotations_with_style(text: &mut String, doc: &Document, compact: boo
 mod tests {
     use super::*;
     use image::{Rgba, RgbaImage};
+    use std::sync::atomic::{AtomicU64, Ordering};
     use std::time::{SystemTime, UNIX_EPOCH};
     use zip::ZipArchive;
     struct Temp(PathBuf);
     impl Temp {
         fn new() -> Self {
+            // 系统时钟精度有限；并行测试不能只凭时间戳共用目录。
+            static SEQUENCE: AtomicU64 = AtomicU64::new(0);
             let p = Path::new(env!("CARGO_MANIFEST_DIR"))
                 .join("target/delivery-tests")
                 .join(format!(
-                    "{}-{}",
+                    "{}-{}-{}",
                     std::process::id(),
                     SystemTime::now()
                         .duration_since(UNIX_EPOCH)
                         .unwrap()
-                        .as_nanos()
+                        .as_nanos(),
+                    SEQUENCE.fetch_add(1, Ordering::Relaxed),
                 ));
             fs::create_dir_all(&p).unwrap();
             Self(p)
