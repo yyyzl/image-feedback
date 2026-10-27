@@ -1,31 +1,27 @@
-# Image Feedback v0.1.1
+# Image Feedback v0.1.2
 
-Native, local-first image feedback editor for Windows and macOS.
+Windows 和 macOS 本地图片反馈编辑器。
 
-## Changes in v0.1.1
+## 本次更新
 
-- Dedicated monochrome macOS menu-bar icon, using an AppKit template image for automatic light/dark and selection tinting.
-- Dock, Applications and Windows icons retain the original full-color artwork.
-- Verify the actual menu-bar image template flag on both Apple Silicon and Intel.
-- Window regressions wait for image loading and analysis readiness with a bounded timeout, rather than failing solely because a CI machine needs more than two seconds to start.
-- Add an atomic sequence to temporary/export names, preventing same-process collisions when the Windows clock returns identical timestamps; verified with a fixed-clock multithreaded regression.
+- 修复撤销、重做在批注输入框获得焦点时失效的问题；连续撤销删除批注后，仍可继续重做。支持 Ctrl/⌘+Z、Ctrl/⌘+Shift+Z 和 Ctrl+Y。
+- 增加“新建项目”（Ctrl/⌘+N），有未保存修改时可先保存、不保存或取消。
+- 增加批注栏右上角的“清空当前”：保留图片，确认后清除全部批注、文字意见和图块移动；一次撤销即可整体恢复。
+- 将“适应”改为“显示全图”，缩放并居中显示完整图片。
+- 精简 macOS 安装盘，只显示应用和 Applications 快捷方式。
 
-## Install
+## 下载与安装
 
-- **Windows 10/11 x64:** run the setup EXE. It installs the application, Start Menu entries and uninstaller. CRT is statically linked; Rust, Qt, Node.js and a separate VC Redistributable are not required.
-- **macOS Universal:** open the DMG, drag Image Feedback.app to Applications, eject the image and launch from Applications. Both Apple Silicon and Intel slices are included and checked in separate runtime jobs.
+- **Windows 10/11 x64**：下载 `ImageFeedback-0.1.2-windows-x64-setup.exe`，运行安装器。更新前请保存项目，并退出编辑窗口和托盘入口；安装器不会强制结束正在编辑的程序。
+- **macOS 13+，Apple Silicon / Intel**：下载 `ImageFeedback-0.1.2-macos-universal-adhoc.dmg`，打开后将 Image Feedback.app 拖入 Applications，推出安装盘再启动。
+- 使用同名 `.sha256` 文件核验下载完整性。
 
-**Trust status:** the Windows installer is unsigned. The macOS app is ad-hoc signed, **not Apple-notarized**; first launch may require Open Anyway in Privacy & Security. This release does not claim Gatekeeper or SmartScreen approval. Check the attached SHA-256 files.
+安装包包含应用所需运行内容，不要求用户安装 Rust、Qt、Node.js 或单独的 VC++ Redistributable。Windows 静态链接 CRT；macOS 安装包包含 arm64 和 x86_64 两种架构。
 
-## Features
+## 验证与签名说明
 
-- Region, point and global comments; optional smart region recommendations.
-- Move image regions while preserving the original, stable annotation IDs and undo/redo.
-- Compact copy: one original-image path plus concise coordinate-based suggestions.
-- Portable project save and feedback package export; optional Base64 image data.
-- Native macOS top-left window controls and guarded application Quit; custom Windows title bar.
-- Installer refuses a running application rather than forcibly discarding edits. Uninstall preserves user data.
+发行工作流检查动态库、运行 Rust 测试，并验证 Windows 实际安装、修复安装及卸载；macOS 在 Apple Silicon 和 Intel 上分别验证复制安装后的应用及窗口交互。窗口回归使用真实 Slint 窗口和场景键盘、指针事件，不等同于物理输入、真实 IME、干净虚拟机或最低系统版本认证。
 
-Release jobs build the installers, audit dynamic dependencies and run Rust plus copied/installed-application scene regressions. These are not physical mouse/UIA, real IME, clean-VM or minimum-OS certification tests.
+Windows 安装器尚未签名；macOS 应用为 ad-hoc 签名，尚未通过 Apple 公证。macOS 首次启动可能需要在“系统设置 → 隐私与安全性”选择允许打开。
 
-See the repository README for usage, limitations, privacy and dependency licensing. No automatic updates or background image uploads.
+图片与项目始终在本地处理，原图保持不变。卸载不清理用户项目和应用数据；本版本不包含自动更新。
