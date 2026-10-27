@@ -349,12 +349,23 @@ fn alignment_poll(
                         "cross-device copy help was not keyboard discoverable",
                     )?;
                     save_window_snapshot(&ui, &folder.join("keyboard-copy-help.png"))?;
-                    std::fs::write(folder.join("ui-report.json"), serde_json::to_vec_pretty(&serde_json::json!({
-                        "result":"passed", "platform":std::env::consts::OS,
-                        "method":"real Slint window, scene-dispatched keyboard/pointer events, isolated data and clipboard; not physical IME or screen-reader certification",
-                        "checks":["collapsed/expanded rows and header toggle", "collapse commits drafts", "model sync preserves caret", "Delete/Backspace edit text only", "Escape cancels pending text", "Ctrl/Command+Enter commits and closes", "invalid text blocks collapse and restores focus", "copy failure preserves the draft", "independent collapsed delete, safe default, cancel and undo", "1000 notes with full text retained", "1000x688 logical window", "keyboard discoverable cross-device help"]
-                    })).unwrap()).map_err(|e| e.to_string())?;
-                    let _ = ui.hide();
+                    let before = ui.get_note_scroll_y();
+                    ui.window()
+                        .dispatch_event(slint::platform::WindowEvent::PointerScrolled {
+                            position: slint::LogicalPosition::new(
+                                ui.get_active_note_header_x(),
+                                ui.get_active_note_header_y(),
+                            ),
+                            delta_x: 0.,
+                            delta_y: 400.,
+                        });
+                    let scrolled = ui.get_note_scroll_y();
+                    require(
+                        scrolled > before + 100.,
+                        "manual note-list scroll did not move",
+                    )?;
+                    ui.invoke_fit_view();
+                    finish_alignment(&ui, &folder, failure.clone(), scrolled);
                     return Ok(());
                 }
                 _ => unreachable!(),
@@ -372,6 +383,38 @@ fn alignment_poll(
         })();
         if let Err(error) = result {
             fail(&ui, &folder, &failure, error);
+        }
+    });
+}
+
+fn finish_alignment(
+    ui: &AppWindow,
+    folder: &Path,
+    failure: Rc<RefCell<Option<String>>>,
+    scrolled: f32,
+) {
+    let weak = ui.as_weak();
+    let folder = folder.to_path_buf();
+    slint::Timer::single_shot(Duration::from_millis(70), move || {
+        let Some(ui) = weak.upgrade() else {
+            return;
+        };
+        let result = (|| -> Result<(), String> {
+            require(
+                (ui.get_note_scroll_y() - scrolled).abs() < 1.,
+                "ordinary redraw pulled the manually scrolled list back to the editor",
+            )?;
+            std::fs::write(folder.join("ui-report.json"), serde_json::to_vec_pretty(&serde_json::json!({
+                "result":"passed", "platform":std::env::consts::OS,
+                "method":"real Slint window, scene-dispatched keyboard/pointer events, isolated data and clipboard; not physical IME or screen-reader certification",
+                "checks":["collapsed/expanded rows and header toggle", "collapse commits drafts", "model sync preserves caret", "Delete/Backspace edit text only", "Escape cancels pending text", "Ctrl/Command+Enter commits and closes", "invalid text blocks collapse and restores focus", "copy failure preserves the draft", "independent collapsed delete, safe default, cancel and undo", "1000 notes with full text retained", "1000x688 logical window", "keyboard discoverable cross-device help", "manual list scroll survives ordinary redraw"]
+            })).unwrap()).map_err(|e| e.to_string())?;
+            Ok(())
+        })();
+        if let Err(error) = result {
+            fail(&ui, &folder, &failure, error);
+        } else {
+            let _ = ui.hide();
         }
     });
 }

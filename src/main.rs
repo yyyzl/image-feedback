@@ -962,8 +962,9 @@ fn sync(ui: &AppWindow, e: &mut Editor) {
     ui.set_marks(ModelRc::new(VecModel::from(marks)));
     if refresh_notes {
         let token = e.selected.map(|id| ui_token(e, id)).unwrap_or(0);
+        let previous_token = ui.get_active_note_token();
         ui.set_active_note_token(token);
-        if e.revealed_selection != e.selected {
+        if e.revealed_selection != e.selected || previous_token != token {
             e.revealed_selection = e.selected;
             if token > 0 {
                 let weak = ui.as_weak();

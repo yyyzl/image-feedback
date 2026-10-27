@@ -959,9 +959,12 @@ export component AppWindow inherits Window {
                     padding-bottom: 12px;
                     for note[index] in root.notes : noteCard := Rectangle {
                         property <bool> editor-focused: false;
+                        property <length> layout-top: noteList.y + self.y;
+                        property <length> layout-bottom: self.layout-top + self.height;
+                        property <length> list-content-height: noteScroll.content-height;
                         property <NoteViewState> view-state: {
                             token: note.id, index: index,
-                            top: noteList.y + self.y, bottom: noteList.y + self.y + self.height,
+                            top: self.layout-top, bottom: self.layout-bottom,
                             focused: self.editor-focused,
                             active: note.selected && note.id == root.active-note-token,
                             composing: self.editor-composing,
@@ -985,6 +988,17 @@ export component AppWindow inherits Window {
                                 root.note-reveal-applied = root.note-reveal-request;
                             }
                         }
+                        // 大批量创建行时，列表高度与卡片位置可能分多次完成布局。
+                        // 只在这些几何值改变时修正滚动；普通重绘和手动滚动不抢焦点。
+                        function reveal-after-layout() {
+                            if self.view-state.active && root.note-reveal-token == note.id && !root.confirm-visible {
+                                root.reveal-note-bounds(self.layout-top, self.layout-bottom);
+                            }
+                            self.reveal-pending();
+                        }
+                        changed layout-top => { self.reveal-after-layout(); }
+                        changed layout-bottom => { self.reveal-after-layout(); }
+                        changed list-content-height => { self.reveal-after-layout(); }
                         init => { self.publish-state(); self.reveal-pending(); }
                         changed view-state => { self.publish-state(); self.reveal-pending(); }
                         changed reveal-request => { self.reveal-pending(); }
