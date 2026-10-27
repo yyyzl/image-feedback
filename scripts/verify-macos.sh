@@ -15,6 +15,12 @@ trap cleanup EXIT
 hdiutil verify "$DMG"
 hdiutil attach -readonly -nobrowse -mountpoint "$MOUNT" "$DMG"
 MOUNTED=1
+# Keep the mounted image uncluttered: only the app and drag-install shortcut are visible.
+python3 - "$MOUNT" <<'PY'
+import pathlib,sys
+visible=sorted(p.name for p in pathlib.Path(sys.argv[1]).iterdir() if not p.name.startswith('.'))
+assert visible==['Applications','Image Feedback.app'],visible
+PY
 [[ "$(readlink "$MOUNT/Applications")" == /Applications ]]
 codesign --verify --deep --strict "$MOUNT/Image Feedback.app"
 ditto "$MOUNT/Image Feedback.app" "$WORK/Applications/Image Feedback.app"
