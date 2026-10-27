@@ -78,6 +78,7 @@ enum Work {
 }
 #[derive(Clone, Debug, PartialEq)]
 enum PendingAction {
+    New,
     Close,
     Load { path: PathBuf, project: bool },
     Demo { annotated: bool },
@@ -93,6 +94,7 @@ struct SaveConfirmation {
 enum MessageAction {
     Dismiss,
     Remove(u64),
+    ClearFeedback,
     CloseNotice,
 }
 #[derive(Clone, Debug)]
@@ -181,6 +183,50 @@ impl Default for Editor {
     }
 }
 impl Editor {
+    fn clear_feedback(&mut self) -> Result<(), String> {
+        self.flush()?;
+        if let Some(history) = self.history.as_mut() {
+            history.apply(|doc| {
+                doc.annotations.clear();
+                Ok(())
+            })?;
+        }
+        self.selected = None;
+        self.revealed_selection = None;
+        self.gesture = None;
+        self.hover = None;
+        self.hover_point = None;
+        self.delivery = None;
+        Ok(())
+    }
+    fn new_project(&mut self) {
+        if let Some(analysis) = self.analysis.as_ref() {
+            analysis.cancel();
+        }
+        self.history = None;
+        self.asset = None;
+        self.project = None;
+        self.saved = None;
+        self.selected = None;
+        self.pending = None;
+        self.gesture = None;
+        self.view = View {
+            scale: 1.,
+            fit: true,
+            ..Default::default()
+        };
+        self.tool = 0;
+        self.preview_scale = 1.;
+        self.preview_scale_y = 1.;
+        self.analysis_loading = false;
+        self.candidates.clear();
+        self.eligible.clear();
+        self.ownership.clear();
+        self.hover = None;
+        self.hover_point = None;
+        self.delivery = None;
+        self.revealed_selection = None;
+    }
     fn doc(&self) -> Option<&Document> {
         self.history.as_ref().map(History::document)
     }
@@ -655,12 +701,17 @@ fn sync_confirmation(ui: &AppWindow, e: &Editor) {
         ui.set_confirm_description(message.description.clone().into());
         ui.set_confirm_name(message.name.clone().into());
         ui.set_confirm_save_label(message.primary.clone().into());
-        ui.set_confirm_show_cancel(matches!(message.action, MessageAction::Remove(_)));
+        ui.set_confirm_show_cancel(matches!(
+            message.action,
+            MessageAction::Remove(_) | MessageAction::ClearFeedback
+        ));
         ui.set_confirm_show_discard(false);
         ui.set_confirm_destructive(message.destructive);
         ui.set_confirm_footnote(
             if matches!(message.action, MessageAction::Remove(_)) {
                 "移除后可通过撤销恢复。"
+            } else if matches!(message.action, MessageAction::ClearFeedback) {
+                "清空后可按 Ctrl/⌘+Z 一次恢复全部内容。"
             } else {
                 ""
             }
@@ -678,6 +729,8 @@ fn sync_confirmation(ui: &AppWindow, e: &Editor) {
         ui.set_confirm_title(
             if closing {
                 "保存修改后再关闭？"
+            } else if matches!(c.action, PendingAction::New) {
+                "新建前保存当前项目？"
             } else {
                 "先保存当前修改？"
             }
@@ -686,6 +739,8 @@ fn sync_confirmation(ui: &AppWindow, e: &Editor) {
         ui.set_confirm_description(
             if closing {
                 "未保存的批注和位置调整将丢失。保存后，可随时回来继续编辑。"
+            } else if matches!(c.action, PendingAction::New) {
+                "新建后将返回空白工作区。请先保存当前批注和位置调整，或选择不保存。"
             } else {
                 "即将替换当前图片或项目。请先保存，或明确选择不保存。"
             }
@@ -702,6 +757,8 @@ fn sync_confirmation(ui: &AppWindow, e: &Editor) {
         ui.set_confirm_save_label(
             if closing {
                 "保存并关闭"
+            } else if matches!(c.action, PendingAction::New) {
+                "保存并新建"
             } else {
                 "保存并继续"
             }
@@ -730,7 +787,18 @@ fn sync(ui: &AppWindow, e: &mut Editor) {
     }
     let Some(doc) = e.doc() else {
         ui.set_loaded(false);
+        ui.set_source_image(slint::Image::default());
+        ui.set_image_name("尚未导入图片".into());
+        ui.set_dirty(false);
+        ui.set_can_undo(false);
+        ui.set_can_redo(false);
+        ui.set_note_count(0);
+        ui.set_notes(ModelRc::default());
+        ui.set_marks(ModelRc::default());
         ui.set_active_note_token(0);
+        ui.set_smart_status("智能预选 · 载入图片后准备".into());
+        ui.set_tool(e.tool);
+        ui.set_zoom_label("100%".into());
         return;
     };
     ui.set_loaded(true);
@@ -879,6 +947,18 @@ fn sync(ui: &AppWindow, e: &mut Editor) {
 }
 fn perform_action(ui: &AppWindow, e: &mut Editor, timer: &Rc<slint::Timer>, action: PendingAction) {
     match action {
+        PendingAction::New => {
+            e.new_project();
+            ui.set_preview_visible(false);
+            ui.set_hover_visible(false);
+            ui.set_toast_visible(false);
+            ui.set_copy_complete(false);
+            ui.set_space_held(false);
+            ui.set_shift_held(false);
+            sync(ui, e);
+            ui.invoke_focus_canvas();
+            set_status(ui, "新项目已就绪 · 导入或粘贴图片开始反馈");
+        }
         PendingAction::Close => {
             let _ = ui.hide();
         }
@@ -905,6 +985,17 @@ fn confirmation_response(ui: &AppWindow, e: &mut Editor, timer: &Rc<slint::Timer
     if let Some(message) = e.message.take() {
         match message.action {
             MessageAction::Remove(id) if response == 2 => remove_annotation(ui, e, id),
+            MessageAction::ClearFeedback if response == 2 => {
+                if let Err(error) = e.clear_feedback() {
+                    show_message(ui, e, "无法清空当前反馈", error);
+                    return;
+                }
+                ui.set_preview_visible(false);
+                ui.set_hover_visible(false);
+                ui.set_copy_complete(false);
+                ui.invoke_focus_canvas();
+                set_status(ui, "已清空当前反馈 · 图片保留，可撤销恢复");
+            }
             MessageAction::CloseNotice => {
                 let _ = ui.hide();
             }
@@ -1886,6 +1977,46 @@ fn run_editor(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
         let weak = ui.as_weak();
         let state = editor.clone();
         let t = timer.clone();
+        ui.on_new_project(move || {
+            if let Some(ui) = weak.upgrade() {
+                begin_action(&ui, &mut state.borrow_mut(), &t, PendingAction::New);
+            }
+        });
+    }
+    {
+        let weak = ui.as_weak();
+        let state = editor.clone();
+        ui.on_clear_feedback(move || {
+            let Some(ui) = weak.upgrade() else {
+                return;
+            };
+            let mut e = state.borrow_mut();
+            if e.worker.is_some()
+                || e.confirmation.is_some()
+                || e.message.is_some()
+                || !e.doc().is_some_and(|d| !d.annotations.is_empty())
+            {
+                return;
+            }
+            e.message = Some(AppMessage {
+                title: "清空当前反馈？".into(),
+                description: "保留当前图片，清除全部批注、文字意见并复原图块位置。".into(),
+                name: e.doc().unwrap().image.file_name.clone(),
+                primary: "清空当前".into(),
+                destructive: true,
+                action: MessageAction::ClearFeedback,
+            });
+            e.gesture = None;
+            clear_hover(&ui, &mut e);
+            ui.set_preview_visible(false);
+            ui.set_toast_visible(false);
+            sync_confirmation(&ui, &e);
+        });
+    }
+    {
+        let weak = ui.as_weak();
+        let state = editor.clone();
+        let t = timer.clone();
         ui.on_import_image(move || {
             let Some(ui) = weak.upgrade() else {
                 return;
@@ -2047,6 +2178,13 @@ fn run_editor(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
             };
             e.pending = Some((actual, text.into()));
             ui.set_dirty(e.dirty());
+            let draft_changed = e.pending.as_ref().is_some_and(|(id, text)| {
+                e.doc()
+                    .and_then(|d| d.annotation(*id))
+                    .is_some_and(|n| n.text != *text)
+            });
+            ui.set_can_undo(draft_changed || e.history.as_ref().is_some_and(History::can_undo));
+            ui.set_can_redo(!draft_changed && e.history.as_ref().is_some_and(History::can_redo));
         });
     }
     {
@@ -2116,8 +2254,13 @@ fn run_editor(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
             if let Some(h) = e.history.as_mut() {
                 h.undo();
             }
-            e.selected = None;
+            e.selected = e
+                .selected
+                .filter(|id| e.doc().is_some_and(|d| d.annotation(*id).is_some()));
             sync(&ui, &mut e);
+            if e.selected.is_none() {
+                ui.invoke_focus_canvas();
+            }
         });
     }
     {
@@ -2141,8 +2284,13 @@ fn run_editor(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
             if let Some(h) = e.history.as_mut() {
                 h.redo();
             }
-            e.selected = None;
+            e.selected = e
+                .selected
+                .filter(|id| e.doc().is_some_and(|d| d.annotation(*id).is_some()));
             sync(&ui, &mut e);
+            if e.selected.is_none() {
+                ui.invoke_focus_canvas();
+            }
         });
     }
     {

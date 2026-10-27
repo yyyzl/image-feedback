@@ -14,6 +14,26 @@ fn key(ui: &AppWindow, text: slint::SharedString) {
     ui.window()
         .dispatch_event(slint::platform::WindowEvent::KeyReleased { text });
 }
+fn shortcut(ui: &AppWindow, text: &str, shift: bool) {
+    use slint::platform::{Key, WindowEvent};
+    ui.window().dispatch_event(WindowEvent::KeyPressed {
+        text: Key::Control.into(),
+    });
+    if shift {
+        ui.window().dispatch_event(WindowEvent::KeyPressed {
+            text: Key::Shift.into(),
+        });
+    }
+    key(ui, text.into());
+    if shift {
+        ui.window().dispatch_event(WindowEvent::KeyReleased {
+            text: Key::Shift.into(),
+        });
+    }
+    ui.window().dispatch_event(WindowEvent::KeyReleased {
+        text: Key::Control.into(),
+    });
+}
 fn close_click(ui: &AppWindow) -> Result<(), String> {
     smoke_request_close(ui)
 }
@@ -34,6 +54,30 @@ pub(super) fn start(
     folder: PathBuf,
     failure: Rc<RefCell<Option<String>>>,
 ) {
+    ui.window()
+        .dispatch_event(slint::platform::WindowEvent::WindowActiveChanged(true));
+    ui.invoke_add_global();
+    let token = ui.get_active_note_token();
+    ui.invoke_note_edited(token, "需要保存的批注与位置说明".into());
+    ui.invoke_note_edit_finished(token);
+    let weak = ui.as_weak();
+    let state = state.clone();
+    let timer = timer.clone();
+    // 等待真实布局和输入框的焦点通知，随后再发送键盘事件。
+    slint::Timer::single_shot(Duration::from_millis(70), move || {
+        if let Some(ui) = weak.upgrade() {
+            start_ready(&ui, &state, &timer, folder, failure);
+        }
+    });
+}
+
+fn start_ready(
+    ui: &AppWindow,
+    state: &Rc<RefCell<Editor>>,
+    timer: &Rc<slint::Timer>,
+    folder: PathBuf,
+    failure: Rc<RefCell<Option<String>>>,
+) {
     let result = (|| -> Result<Document, String> {
         std::fs::create_dir_all(&folder).map_err(|e| e.to_string())?;
         require(
@@ -42,12 +86,75 @@ pub(super) fn start(
         )?;
         ui.window()
             .dispatch_event(slint::platform::WindowEvent::WindowActiveChanged(true));
-        ui.invoke_add_global();
         let id = state.borrow().selected.ok_or("global note missing")?;
         let token = ui_token(&state.borrow(), id);
-        ui.invoke_note_edited(token, "需要保存的批注与位置说明".into());
-        ui.invoke_note_edit_finished(token);
         let original = state.borrow().doc().unwrap().clone();
+        save_window_snapshot(ui, &folder.join("focused-editor.png"))?;
+        // 以真实键入落入批注草稿为准，避免把延迟的焦点状态通知当作输入就绪。
+        key(ui, "x".into());
+        require(
+            state
+                .borrow()
+                .pending
+                .as_ref()
+                .is_some_and(|(actual, text)| *actual == id && text.contains('x')),
+            "keyboard input did not reach the active note editor",
+        )?;
+        shortcut(ui, "z", false);
+        require(
+            state.borrow().doc() == Some(&original),
+            "keyboard undo did not restore the uncommitted text draft",
+        )?;
+        shortcut(ui, "z", false);
+        require(
+            state
+                .borrow()
+                .doc()
+                .unwrap()
+                .annotation(id)
+                .unwrap()
+                .text
+                .is_empty(),
+            "Ctrl/Command+Z did not undo text with the note editor focused",
+        )?;
+        shortcut(ui, "z", true);
+        require(
+            state.borrow().doc() == Some(&original),
+            "Shift+Ctrl/Command+Z did not redo text",
+        )?;
+        shortcut(ui, "z", false);
+        shortcut(ui, "y", false);
+        require(
+            state.borrow().doc() == Some(&original),
+            "Ctrl+Y did not redo text",
+        )?;
+        shortcut(ui, "z", false);
+        shortcut(ui, "z", false);
+        require(
+            state.borrow().doc().unwrap().annotations.is_empty(),
+            "second undo did not remove the new annotation",
+        )?;
+        shortcut(ui, "z", true);
+        shortcut(ui, "z", true);
+        require(
+            state.borrow().doc() == Some(&original),
+            "redo stopped working after the focused editor was removed",
+        )?;
+        shortcut(ui, "n", false);
+        require(
+            ui.get_confirm_visible(),
+            "new-project shortcut did not protect unsaved changes",
+        )?;
+        shortcut(ui, "z", false);
+        require(
+            state.borrow().doc() == Some(&original),
+            "history shortcut escaped the modal",
+        )?;
+        cancel(ui);
+        require(
+            state.borrow().doc() == Some(&original),
+            "cancelling new project changed the document",
+        )?;
         close_click(ui)?;
         require(
             ui.get_confirm_visible(),
@@ -129,6 +236,55 @@ pub(super) fn start(
         require(
             state.borrow().doc() == Some(&original),
             "undo did not recover the deleted note",
+        )?;
+
+        window_pointer_click(
+            ui,
+            ui.get_clear_feedback_center_x(),
+            ui.get_clear_feedback_center_y(),
+        );
+        require(
+            ui.get_confirm_visible() && ui.get_confirm_destructive(),
+            "clear-current button did not open its confirmation",
+        )?;
+        save_window_snapshot(ui, &folder.join("clear-confirmation.png"))?;
+        cancel(ui);
+        require(
+            state.borrow().doc() == Some(&original),
+            "cancelling clear changed current feedback",
+        )?;
+        let asset = state.borrow().asset.clone().unwrap();
+        window_pointer_click(
+            ui,
+            ui.get_clear_feedback_center_x(),
+            ui.get_clear_feedback_center_y(),
+        );
+        primary(ui);
+        require(
+            ui.get_loaded()
+                && state.borrow().doc().unwrap().annotations.is_empty()
+                && ui.get_note_count() == 0,
+            "clear-current did not keep the image and remove feedback",
+        )?;
+        require(
+            Arc::ptr_eq(state.borrow().asset.as_ref().unwrap(), &asset),
+            "clear-current replaced the source image",
+        )?;
+        save_window_snapshot(ui, &folder.join("cleared-feedback.png"))?;
+        shortcut(ui, "z", false);
+        require(
+            state.borrow().doc() == Some(&original),
+            "undo did not restore all cleared feedback in one step",
+        )?;
+        shortcut(ui, "z", true);
+        require(
+            state.borrow().doc().unwrap().annotations.is_empty(),
+            "redo did not clear feedback again",
+        )?;
+        shortcut(ui, "z", false);
+        require(
+            state.borrow().doc() == Some(&original),
+            "restoring cleared feedback failed",
         )?;
 
         show_message(
@@ -251,7 +407,7 @@ fn poll(
                     1,
                     Instant::now() + Duration::from_secs(10),
                 );
-            } else {
+            } else if stage == 1 {
                 require(
                     !ui.get_confirm_visible() && state.borrow().confirmation.is_none(),
                     "successful save did not finish the confirmation",
@@ -265,6 +421,74 @@ fn poll(
                     saved == expected,
                     "save-and-continue did not preserve the previous project",
                 )?;
+                shortcut(&ui, "n", false);
+                require(
+                    !ui.get_loaded() && state.borrow().doc().is_none(),
+                    "clean new project did not return to the empty workspace",
+                )?;
+                require(
+                    !ui.get_can_undo()
+                        && !ui.get_can_redo()
+                        && ui.get_notes().row_count() == 0
+                        && ui.get_marks().row_count() == 0
+                        && !ui.get_dirty(),
+                    "new project retained old history or annotations",
+                )?;
+                save_window_snapshot(&ui, &folder.join("new-project.png"))?;
+                let (_, asset) = storage::open_project(&folder.join("confirmed-save.ifp"))?;
+                let thumb = preview(&asset);
+                install(
+                    &ui,
+                    &mut state.borrow_mut(),
+                    saved,
+                    asset,
+                    Some(folder.join("confirmed-save.ifp")),
+                    thumb,
+                );
+                ui.invoke_add_global();
+                ui.invoke_new_project();
+                require(
+                    ui.get_confirm_visible(),
+                    "dirty new project did not show its save guard",
+                )?;
+                primary(&ui);
+                poll(
+                    ui.as_weak(),
+                    state.clone(),
+                    timer.clone(),
+                    folder.clone(),
+                    failure.clone(),
+                    expected.clone(),
+                    2,
+                    Instant::now() + Duration::from_secs(10),
+                );
+                return Ok(());
+            }
+            Ok(())
+        })();
+        if stage == 2 && result.is_ok() {
+            let result = (|| -> Result<(), String> {
+                require(
+                    !ui.get_loaded() && state.borrow().doc().is_none() && !ui.get_confirm_visible(),
+                    "save-and-new did not finish before clearing the workspace",
+                )?;
+                let (saved, asset) = storage::open_project(&folder.join("confirmed-save.ifp"))?;
+                require(
+                    saved.annotations.len() == expected.annotations.len() + 1,
+                    "save-and-new lost the current annotations",
+                )?;
+                let thumb = preview(&asset);
+                install(&ui, &mut state.borrow_mut(), saved, asset, None, thumb);
+                ui.invoke_add_global();
+                ui.invoke_new_project();
+                window_pointer_click(&ui, ui.get_confirm_discard_x(), ui.get_confirm_discard_y());
+                require(
+                    !ui.get_loaded() && !ui.get_confirm_visible(),
+                    "discard-and-new did not clear the workspace",
+                )?;
+                let (saved, asset) = storage::open_project(&folder.join("confirmed-save.ifp"))?;
+                let thumb = preview(&asset);
+                install(&ui, &mut state.borrow_mut(), saved, asset, None, thumb);
                 ui.invoke_add_global();
                 close_click(&ui)?;
                 require(
@@ -275,7 +499,18 @@ fn poll(
                 let report = serde_json::json!({"result":"passed","method":"real Slint window with scene-dispatched pointer and key events; real asynchronous filesystem save failure and successful save; not OS input automation","checks":["self-drawn close/save prompt","modal pointer and keyboard blocking","Tab navigation and Escape cancellation","cancel preserves data","validation failure retains draft","self-drawn delete confirmation and undo","self-drawn error acknowledgement","save-in-progress controls blocked","filesystem failure retains dialog and data","save succeeds before queued image replacement","discard closes only after explicit choice"],"saved_project":"confirmed-save.ifp"});
                 std::fs::write(
                     folder.join("dialog-report.json"),
-                    serde_json::to_vec_pretty(&report).unwrap(),
+                    serde_json::to_vec_pretty(&{
+                        let mut report = report;
+                        report["checks"].as_array_mut().unwrap().extend([
+                            serde_json::json!("real key input in focused note editor"),
+                            serde_json::json!("Ctrl/Command+Z undoes pending text and annotation creation"),
+                            serde_json::json!("Shift+Ctrl/Command+Z and Ctrl+Y redo, including after editor removal"),
+                            serde_json::json!("new project: clean reset, cancellation, save-and-new, discard-and-new"),
+                            serde_json::json!("new project clears annotations, image and undo history"),
+                            serde_json::json!("clear current keeps the image, supports cancellation and one-step undo/redo"),
+                        ]);
+                        report
+                    }).unwrap(),
                 )
                 .map_err(|e| e.to_string())?;
                 let watchdog = ui.as_weak();
@@ -292,9 +527,13 @@ fn poll(
                     }
                 });
                 window_pointer_click(&ui, ui.get_confirm_discard_x(), ui.get_confirm_discard_y());
+                Ok(())
+            })();
+            if let Err(error) = result {
+                fail(&ui, &folder, &failure, error);
             }
-            Ok(())
-        })();
+            return;
+        }
         if let Err(error) = result {
             fail(&ui, &folder, &failure, error);
         }

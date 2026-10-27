@@ -1,5 +1,84 @@
 use super::*;
 #[test]
+fn clear_feedback_keeps_image_project_and_view_and_undo_restores_all_edits() {
+    let mut e = editor();
+    e.history
+        .as_mut()
+        .unwrap()
+        .apply(|doc| {
+            doc.move_annotation(1, 12., 8.)?;
+            doc.add_point(Point { x: 180., y: 120. })?;
+            doc.add_global()?;
+            Ok(())
+        })
+        .unwrap();
+    e.project = Some(PathBuf::from("current.ifp"));
+    e.view.scale = 1.5;
+    e.view.x = 42.;
+    e.pending = Some((1, "尚未完成的批注草稿".into()));
+    let mut expected = e.doc().unwrap().clone();
+    expected.set_text(1, "尚未完成的批注草稿".into()).unwrap();
+    e.clear_feedback().unwrap();
+    assert!(e.doc().unwrap().annotations.is_empty());
+    assert_eq!(e.doc().unwrap().image, expected.image);
+    assert_eq!(e.doc().unwrap().next_id, expected.next_id);
+    assert_eq!(e.project.as_deref(), Some(Path::new("current.ifp")));
+    assert_eq!((e.view.scale, e.view.x), (1.5, 42.));
+    assert!(e.dirty());
+    assert!(e.history.as_mut().unwrap().undo());
+    assert_eq!(e.doc(), Some(&expected));
+    assert!(e.history.as_mut().unwrap().redo());
+    assert!(e.doc().unwrap().annotations.is_empty());
+}
+
+#[test]
+fn failed_clear_keeps_the_invalid_draft_and_existing_edits() {
+    let mut e = editor();
+    let before = e.doc().cloned();
+    e.pending = Some((1, "字".repeat(20_001)));
+    assert!(e.clear_feedback().is_err());
+    assert_eq!(e.doc(), before.as_ref());
+    assert!(e.pending.is_some());
+}
+
+#[test]
+fn new_project_can_be_cancelled_without_losing_the_draft() {
+    let mut e = editor();
+    let original = e.doc().cloned();
+    e.pending = Some((1, "尚未保存的批注".into()));
+    assert_eq!(e.request_action(PendingAction::New), None);
+    assert_eq!(e.confirmation.as_ref().unwrap().action, PendingAction::New);
+    e.cancel_confirmation();
+    assert_eq!(e.doc(), original.as_ref());
+    assert_eq!(e.pending.as_ref().unwrap().1, "尚未保存的批注");
+}
+
+#[test]
+fn new_project_waits_for_a_successful_save_and_clears_document_state() {
+    let mut e = editor();
+    e.project = Some(PathBuf::from("previous.ifp"));
+    e.selected = Some(1);
+    e.pending = Some((1, "保存后新建".into()));
+    e.request_action(PendingAction::New);
+    assert!(e.start_confirmed_save());
+    e.save_problem("写入失败");
+    assert!(e.doc().is_some());
+    assert!(e.pending.is_some());
+    assert!(e.start_confirmed_save());
+    e.flush().unwrap();
+    let snapshot = e.doc().unwrap().clone();
+    assert_eq!(
+        e.saved_successfully(PathBuf::from("previous.ifp"), snapshot),
+        Some(PendingAction::New)
+    );
+    e.new_project();
+    assert!(e.doc().is_none());
+    assert!(e.project.is_none() && e.saved.is_none() && e.asset.is_none());
+    assert!(e.pending.is_none() && e.selected.is_none());
+    assert!(!e.dirty());
+}
+
+#[test]
 fn clean_action_does_not_prompt_or_modify_document() {
     let mut e = editor();
     let before = e.doc().cloned();

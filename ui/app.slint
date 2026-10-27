@@ -268,6 +268,11 @@ export component AppWindow inherits Window {
     }
     changed confirm-saving => { if root.confirm-visible { confirmKeys.focus(); } }
 
+    callback new-project();
+    callback clear-feedback();
+    out property <float> clear-feedback-center-x: (clearFeedback.absolute-position.x + clearFeedback.width / 2) / 1px;
+    out property <float> clear-feedback-center-y: (clearFeedback.absolute-position.y + clearFeedback.height / 2) / 1px;
+    public function focus-canvas() { canvasKeys.focus(); }
     callback import-image();
     callback paste-image();
     callback open-project();
@@ -301,6 +306,26 @@ export component AppWindow inherits Window {
         root.viewport-resized(root.viewport-width, root.viewport-height);
     }
 
+    // 项目快捷键覆盖画布、工具栏和批注编辑器；Slint 在 macOS 将 Control 映射为 ⌘。
+    appKeys := FocusScope {
+        width: parent.width;
+        height: parent.height;
+        capture-key-pressed(event) => {
+            if root.confirm-visible || root.busy { return reject; }
+            if event.modifiers.control && !event.modifiers.alt && !event.modifiers.meta {
+                if event.text.to-lowercase() == "z" {
+                    if event.modifiers.shift { root.redo(); } else { root.undo(); }
+                    return accept;
+                }
+                if !event.modifiers.shift {
+                    if event.text.to-lowercase() == "y" { root.redo(); return accept; }
+                    if event.text.to-lowercase() == "n" { root.new-project(); return accept; }
+                    if event.text.to-lowercase() == "s" { if root.loaded { root.save-project(); } return accept; }
+                    if event.text.to-lowercase() == "o" { root.import-image(); return accept; }
+                }
+            }
+            return reject;
+        }
     helpMenu := PopupWindow {
         x: root.width - 230px; y: root.native-chrome ? 62px : 42px; width: 216px; height: 188px;
         Rectangle { x: 0px; y: 0px; width: parent.width; height: parent.height; border-radius: 9px; border-width: 1px; border-color: #dfe3ed; background: #ffffff;
@@ -342,13 +367,14 @@ export component AppWindow inherits Window {
     }
     Rectangle {
         x: 0px; y: root.titlebar-height; width: parent.width; height: 64px; background: #ffffff;
-        ActionButton { x: 24px; y: 14px; width: 105px; label: "＋ 导入图片"; enabled: !root.busy; clicked => { root.import-image(); } }
-        ActionButton { x: 140px; y: 14px; width: 82px; label: "打开项目"; quiet: true; enabled: !root.busy; clicked => { root.open-project(); } }
-        Rectangle { x: 236px; y: 20px; width: 1px; height: 24px; background: #e9ecf1; }
-        ActionButton { x: 250px; y: 14px; width: 42px; label: "撤销"; quiet: true; enabled: root.can-undo && !root.busy; clicked => { root.undo(); } }
-        ActionButton { x: 296px; y: 14px; width: 42px; label: "重做"; quiet: true; enabled: root.can-redo && !root.busy; clicked => { root.redo(); } }
-        Rectangle { x: 368px; y: 30px; width: 5px; height: 5px; border-radius: 3px; visible: root.dirty; background: #d2a05b; }
-        Text { x: 380px; y: 22px; width: parent.width - 680px - root.more-button-space; height: 21px; visible: root.dirty; text: "有未保存的修改"; color: #939baa; font-size: 11px; overflow: elide; }
+        ActionButton { x: 24px; y: 14px; width: 80px; label: "＋ 新建项目"; enabled: !root.busy; clicked => { root.new-project(); } }
+        ActionButton { x: 112px; y: 14px; width: 88px; label: "导入图片"; enabled: !root.busy; clicked => { root.import-image(); } }
+        ActionButton { x: 208px; y: 14px; width: 76px; label: "打开项目"; quiet: true; enabled: !root.busy; clicked => { root.open-project(); } }
+        Rectangle { x: 296px; y: 20px; width: 1px; height: 24px; background: #e9ecf1; }
+        ActionButton { x: 310px; y: 14px; width: 42px; label: "撤销"; quiet: true; enabled: root.can-undo && !root.busy; clicked => { root.undo(); } }
+        ActionButton { x: 356px; y: 14px; width: 42px; label: "重做"; quiet: true; enabled: root.can-redo && !root.busy; clicked => { root.redo(); } }
+        Rectangle { x: 418px; y: 30px; width: 5px; height: 5px; border-radius: 3px; visible: root.dirty; background: #d2a05b; }
+        Text { x: 430px; y: 22px; width: parent.width - 730px - root.more-button-space; height: 21px; visible: root.dirty; text: "有未保存的修改"; color: #939baa; font-size: 11px; overflow: elide; }
         ActionButton { x: parent.width - 276px - root.more-button-space; y: 14px; width: 112px; label: "保存项目"; enabled: root.loaded && !root.busy; clicked => { root.save-project(); } }
         ActionButton { x: parent.width - 152px - root.more-button-space; y: 14px; width: 128px; label: "导出反馈包  ↗"; primary: true; enabled: root.loaded && !root.busy; clicked => { root.export-package(); } }
         if root.native-chrome : WindowButton { x: parent.width - 60px; y: 16px; kind: 3; description: "更多菜单"; clicked => { helpMenu.show(); } }
@@ -399,7 +425,7 @@ export component AppWindow inherits Window {
                 x: 12px;
                 y: 262px;
                 icon: @image-url("../assets/icons/fit.svg");
-                label: "适应";
+                label: "显示全图";
                 enabled: root.loaded && !root.busy;
                 clicked => { root.fit-view(); }
             }
@@ -557,11 +583,7 @@ export component AppWindow inherits Window {
 
                 canvasKeys := FocusScope {
                     enabled: !root.confirm-visible;
-                    KeyBinding { keys: @keys(Control + S); enabled: root.loaded && !root.busy; activated => { root.save-project(); } }
                     KeyBinding { keys: @keys(Control + V); enabled: !root.busy; activated => { root.paste-image(); } }
-                    KeyBinding { keys: @keys(Control + O); enabled: !root.busy; activated => { root.import-image(); } }
-                    KeyBinding { keys: @keys(Control + Z); enabled: root.can-undo && !root.busy; activated => { root.undo(); } }
-                    KeyBinding { keys: @keys(Control + Shift + Z); enabled: root.can-redo && !root.busy; activated => { root.redo(); } }
                     KeyBinding { keys: @keys(V); activated => { root.choose-tool(0); } }
                     KeyBinding { keys: @keys(P); activated => { root.choose-tool(1); } }
                     KeyBinding { keys: @keys(H); activated => { root.choose-tool(2); } }
@@ -699,7 +721,7 @@ export component AppWindow inherits Window {
                 Rectangle {
                     x: parent.width - self.width - 16px;
                     y: parent.height - self.height - 16px;
-                    width: 208px; height: 38px;
+                    width: 232px; height: 38px;
                     visible: root.loaded;
                     border-radius: 9px;
                     border-width: 1px; border-color: #dce2eb; background: #ffffff;
@@ -724,7 +746,7 @@ export component AppWindow inherits Window {
                     }
                     Rectangle { x: 140px; y: 11px; width: 1px; height: 16px; background: #e5e9ee; }
                     ActionButton {
-                        x: 148px; y: 4px; width: 56px; height: 30px; label: "适应"; quiet: true;
+                        x: 148px; y: 4px; width: 80px; height: 30px; label: "显示全图"; quiet: true;
                         enabled: root.loaded && !root.busy;
                         clicked => { root.fit-view(); }
                     }
@@ -791,6 +813,14 @@ export component AppWindow inherits Window {
                     horizontal-alignment: center;
                     vertical-alignment: center;
                 }
+            }
+            clearFeedback := ActionButton {
+                x: 222px; y: 18px; width: 88px; height: 34px;
+                label: "清空当前";
+                quiet: true;
+                destructive: true;
+                enabled: root.loaded && root.note-count > 0 && !root.busy;
+                clicked => { root.clear-feedback(); }
             }
             ActionButton {
                 x: 20px;
@@ -1175,5 +1205,6 @@ export component AppWindow inherits Window {
                 }
             }
         }
+    }
     }
 }
