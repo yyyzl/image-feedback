@@ -205,6 +205,10 @@ fn poll(
                 }
                 2 => {
                     use base64::Engine;
+                    require(
+                        !ui.get_copy_complete(),
+                        "Base64 success incorrectly marked the feedback button as copied",
+                    )?;
                     let text = state
                         .borrow()
                         .clipboard_written

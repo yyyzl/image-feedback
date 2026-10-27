@@ -2,9 +2,12 @@ import { ScrollView, TextEdit, Palette, AboutSlint } from "std-widgets.slint";
 
 export struct NoteRow {
     id: int,
+    stable-id: string,
     number: int,
     kind-label: string,
     text: string,
+    summary: string,
+    editor-height: float,
     selected: bool,
     detail: string,
 }
@@ -32,76 +35,173 @@ struct NoteViewState {
     bottom: length,
     focused: bool,
     active: bool,
+    composing: bool,
+    header-x: length,
+    header-y: length,
+    delete-x: length,
+    delete-y: length,
+    editor-x: length,
+    editor-y: length,
 }
 
-// Purely presentational controls. Every application action is forwarded to Rust.
+// 共享按钮：鼠标操作不抢走编辑焦点，Tab 和辅助技术仍可直接到达。
 component ActionButton inherits Rectangle {
     in property <string> label;
+    in property <image> icon;
+    in property <length> icon-size: 17px;
+    in property <bool> icon-only: false;
+    in property <string> shortcut;
     in property <bool> primary: false;
     in property <bool> quiet: false;
     in property <bool> enabled: true;
     in property <bool> destructive: false;
     in property <bool> focus-ring: false;
+    in property <length> font-size: 12px;
     out property <bool> hovered: hit.has-hover;
+    out property <bool> focused: keys.has-focus;
     callback clicked();
-
+    function activate() { if root.enabled { root.clicked(); } }
+    property <color> foreground: !root.enabled ? #929cac : root.primary ? #ffffff
+        : root.destructive ? (root.icon-only && !hit.has-hover ? #8994a5 : #b94c56) : #3f4b5d;
+    property <string> tip-text: root.shortcut == "" ? root.label : root.label + " · " + root.shortcut;
     height: 36px;
+    min-width: root.icon-only ? root.icon-size + 17px : content.min-width;
+    preferred-width: root.icon-only ? 36px : content.preferred-width;
+    horizontal-stretch: 0;
     border-radius: 7px;
-    border-width: root.focus-ring ? 2px : (root.quiet ? 0px : 1px);
-    border-color: root.focus-ring ? (root.destructive ? #e7a4ad : #969bf0) : (root.primary ? (root.destructive ? #d35466 : #4f56cf) : #dfe3e9);
-    background: root.primary
-        ? (root.destructive ? (hit.has-hover && root.enabled ? #bc4355 : #d35466) : (hit.has-hover && root.enabled ? #4148bb : #4f56cf))
-        : (hit.has-hover && root.enabled ? #f1f3f6 : (root.quiet ? transparent : #ffffff));
-    opacity: root.enabled ? 1 : 0.42;
-    Text {
-        width: parent.width;
-        height: parent.height;
-        text: root.label;
-        color: root.primary ? #ffffff : (root.destructive ? #cb443b : #374151);
-        font-size: 12px;
-        font-weight: root.primary ? 600 : 500;
-        horizontal-alignment: center;
-        vertical-alignment: center;
+    border-width: root.focus-ring || keys.has-focus ? 2px : (root.quiet ? 0px : 1px);
+    border-color: root.focus-ring || keys.has-focus ? #7085eb : !root.enabled ? #e0e5ed
+        : root.primary ? #4562e5 : hit.has-hover ? #cbd3df : #dfe4ec;
+    background: !root.enabled ? (root.quiet ? transparent : #f7f8fa)
+        : root.primary ? (hit.pressed ? #2e49c6 : hit.has-hover ? #3653d7 : #4562e5)
+        : root.destructive && hit.has-hover ? #f4e9ed
+        : hit.pressed ? #edf1f8 : hit.has-hover ? #f2f4f8 : root.quiet ? transparent : #ffffff;
+    animate background, border-color { duration: root.enabled ? 100ms : 0ms; }
+    forward-focus: keys;
+    accessible-role: button;
+    accessible-label: root.label;
+    accessible-description: root.shortcut;
+    accessible-enabled: root.enabled;
+    accessible-action-default => { root.activate(); }
+    content := HorizontalLayout {
+        padding-left: root.icon-only ? 0px : 13px;
+        padding-right: root.icon-only ? 0px : 13px;
+        spacing: 7px;
+        alignment: center;
+        if root.icon.width > 0 : Image {
+            y: (parent.height - self.height) / 2;
+            width: root.icon-size; height: root.icon-size;
+            source: root.icon; colorize: root.foreground;
+            image-fit: contain;
+        }
+        if !root.icon-only : Text {
+            text: root.label; color: root.foreground;
+            font-size: root.font-size; font-weight: 500;
+            vertical-alignment: center;
+        }
     }
-    hit := TouchArea {
-        enabled: root.enabled;
-        clicked => { root.clicked(); }
+    hit := TouchArea { enabled: root.enabled; clicked => { root.activate(); } }
+    keys := FocusScope {
+        width: 0px; height: 0px; enabled: root.enabled;
+        key-pressed(event) => {
+            if event.text == Key.Return || event.text == " " { root.activate(); return accept; }
+            return reject;
+        }
     }
+    Tooltip { text: @markdown("\{root.tip-text}"); }
 }
 
 component ToolButton inherits Rectangle {
     in property <image> icon;
     in property <string> label;
+    in property <string> shortcut;
     in property <bool> active-state: false;
     in property <bool> enabled: true;
     callback clicked();
-
-    width: 48px;
-    height: 65px;
-    border-radius: 9px;
-    background: root.active-state ? #eef0ff : (hit.has-hover && root.enabled ? #f3f5f8 : transparent);
-    opacity: root.enabled ? 1 : 0.42;
+    width: 48px; height: 61px; border-radius: 8px;
+    background: root.active-state ? #e9edff : (hit.has-hover && root.enabled ? #f3f5fa : transparent);
+    border-width: keys.has-focus ? 2px : 0px; border-color: #7085eb;
+    animate background { duration: 120ms; }
+    forward-focus: keys;
+    accessible-role: button;
+    accessible-label: root.label;
+    accessible-description: root.shortcut;
+    accessible-enabled: root.enabled;
+    accessible-checkable: true;
+    accessible-checked: root.active-state;
+    accessible-action-default => { if root.enabled { root.clicked(); } }
     Image {
-        x: 12px;
-        y: 9px;
-        width: 24px;
-        height: 24px;
-        source: root.icon;
-        image-fit: contain;
+        x: 13px; y: 9px; width: 22px; height: 22px;
+        source: root.icon; image-fit: contain;
+        colorize: !root.enabled ? #a6afbd : root.active-state ? #3e5ad6 : #697487;
     }
     Text {
-        y: 39px;
-        width: parent.width;
-        height: 18px;
-        text: root.label;
-        color: root.active-state ? #4f56cf : #687182;
-        font-size: 11px;
-        font-weight: root.active-state ? 600 : 400;
-        horizontal-alignment: center;
+        y: 37px; width: parent.width; height: 16px;
+        text: root.label; font-size: 10px;
+        color: !root.enabled ? #a6afbd : root.active-state ? #3e5ad6 : #697487;
+        font-weight: root.active-state ? 600 : 400; horizontal-alignment: center;
     }
-    hit := TouchArea {
-        enabled: root.enabled;
-        clicked => { root.clicked(); }
+    hit := TouchArea { enabled: root.enabled; clicked => { root.clicked(); } }
+    keys := FocusScope {
+        width: 0px; height: 0px; enabled: root.enabled;
+        key-pressed(event) => {
+            if event.text == Key.Return || event.text == " " { root.clicked(); return accept; }
+            return reject;
+        }
+    }
+    Tooltip { text: @markdown("\{root.label} · \{root.shortcut}"); }
+}
+
+// 原生 TextInput 保留输入法、选区与文字键盘行为；外框和滚动由本组件统一。
+component NoteEditor inherits Rectangle {
+    in-out property <string> text;
+    in property <bool> enabled: true;
+    out property <bool> has-focus: input.has-focus;
+    out property <bool> composing: input.preedit-text != "";
+    callback edited(string);
+    callback key-pressed(KeyEvent) -> EventResult;
+    forward-focus: input;
+    border-radius: 7px; background: #ffffff;
+    border-width: input.has-focus ? 2px : 1px;
+    border-color: input.has-focus ? #7085eb : #dfe4ed;
+    animate border-color { duration: 100ms; }
+    ContextMenuArea {
+        width: parent.width; height: parent.height; enabled: root.enabled;
+        Menu {
+            MenuItem { title: "剪切"; activated => { input.cut(); } }
+            MenuItem { title: "复制"; activated => { input.copy(); } }
+            MenuItem { title: "粘贴"; activated => { input.paste(); } }
+            MenuItem { title: "全选"; activated => { input.select-all(); } }
+        }
+        scroll := ScrollView {
+            x: 10px; y: 10px; width: parent.width - 20px; height: parent.height - 20px;
+            content-width: self.visible-width;
+            content-height: max(self.visible-height, input.preferred-height);
+            input := TextInput {
+                text <=> root.text; enabled: root.enabled;
+                single-line: false; wrap: word-wrap; font-size: 12px; color: #344055;
+                selection-background-color: #dce4ff; selection-foreground-color: #26375a;
+                page-height: scroll.visible-height;
+                accessible-role: text-input;
+                accessible-label: "批注意见";
+                accessible-placeholder-text: "写下这处的修改意见…";
+                edited => { root.edited(self.text); }
+                key-pressed(event) => {
+                    if self.preedit-text != "" { return reject; }
+                    root.key-pressed(event)
+                }
+                cursor-position-changed(cursor) => {
+                    let top = cursor.y + scroll.content-y;
+                    let desired = top < 0px ? -cursor.y
+                        : top > scroll.visible-height - 18px ? scroll.visible-height - 18px - cursor.y : scroll.content-y;
+                    scroll.content-y = max(scroll.visible-height - scroll.content-height, min(0px, desired));
+                }
+            }
+        }
+        if root.text == "" && !root.composing : Text {
+            x: 10px; y: 10px; width: parent.width - 20px;
+            text: "写下这处的修改意见…"; font-size: 12px; color: #aeb6c2;
+        }
     }
 }
 
@@ -133,7 +233,6 @@ export component AppWindow inherits Window {
     min-height: 688px;
     in property <bool> native-chrome: false;
     property <length> titlebar-height: root.native-chrome ? 0px : 44px;
-    property <length> more-button-space: root.native-chrome ? 48px : 0px;
     no-frame: !root.native-chrome;
     resize-border-width: root.native-chrome ? 0px : 6px;
     icon: @image-url("../assets/app-icon.png");
@@ -197,6 +296,13 @@ export component AppWindow inherits Window {
     out property <bool> active-note-visible: root.has-active-note && !root.confirm-visible
         && root.active-note-top + root.note-scroll-y >= 0
         && root.active-note-bottom + root.note-scroll-y <= root.notes-viewport-height;
+    out property <float> active-note-header-x: root.active-note-state.header-x / 1px;
+    out property <float> active-note-header-y: root.active-note-state.header-y / 1px;
+    out property <float> active-note-delete-x: root.active-note-state.delete-x / 1px;
+    out property <float> active-note-delete-y: root.active-note-state.delete-y / 1px;
+    out property <float> active-note-editor-x: root.active-note-state.editor-x / 1px;
+    out property <float> active-note-editor-y: root.active-note-state.editor-y / 1px;
+    out property <bool> text-composing: root.has-active-note && root.active-note-state.composing;
     out property <bool> active-editor-focused: root.has-active-note
         && root.active-note-state.focused && !root.confirm-visible && !root.busy;
 
@@ -224,6 +330,9 @@ export component AppWindow inherits Window {
         let target = top + offset < 8px ? 8px - top
             : (bottom + offset > visible - 8px ? visible - 8px - bottom : offset);
         noteScroll.content-y = max(min(0px, visible - noteScroll.content-height), min(0px, target));
+    }
+    changed notes-viewport-height => {
+        if root.has-active-note && !root.confirm-visible { root.reveal-note(root.active-note-token); }
     }
     in property <bool> toast-visible: false;
     in property <bool> toast-success: true;
@@ -260,16 +369,21 @@ export component AppWindow inherits Window {
             about.close();
             root.space-held = false;
             root.shift-held = false;
-            root.confirm-choice = 2;
+            root.confirm-choice = root.confirm-destructive && root.confirm-show-cancel ? 0 : 2;
             confirmKeys.focus();
         } else {
-            canvasKeys.focus();
+            if root.has-active-note { root.reveal-note(root.active-note-token); } else { canvasKeys.focus(); }
         }
     }
     changed confirm-saving => { if root.confirm-visible { confirmKeys.focus(); } }
 
     callback new-project();
     callback clear-feedback();
+    out property <bool> toolbar-fits: fileButtons.absolute-position.x + fileButtons.width <= historyButtons.absolute-position.x
+        && historyButtons.absolute-position.x + historyButtons.width <= saveProjectButton.absolute-position.x
+        && exportPackageButton.absolute-position.x + exportPackageButton.width <= root.width - 20px;
+    public function focus-copy() { copyFeedback.focus(); }
+    out property <bool> copy-help-visible: (copyFeedback.hovered || copyFeedback.focused) && !root.confirm-visible;
     out property <float> clear-feedback-center-x: (clearFeedback.absolute-position.x + clearFeedback.width / 2) / 1px;
     out property <float> clear-feedback-center-y: (clearFeedback.absolute-position.y + clearFeedback.height / 2) / 1px;
     public function focus-canvas() { canvasKeys.focus(); }
@@ -311,7 +425,7 @@ export component AppWindow inherits Window {
         width: parent.width;
         height: parent.height;
         capture-key-pressed(event) => {
-            if root.confirm-visible || root.busy { return reject; }
+            if root.confirm-visible || root.busy || root.text-composing { return reject; }
             if event.modifiers.control && !event.modifiers.alt && !event.modifiers.meta {
                 if event.text.to-lowercase() == "z" {
                     if event.modifiers.shift { root.redo(); } else { root.undo(); }
@@ -329,8 +443,8 @@ export component AppWindow inherits Window {
     helpMenu := PopupWindow {
         x: root.width - 230px; y: root.native-chrome ? 62px : 42px; width: 216px; height: 188px;
         Rectangle { x: 0px; y: 0px; width: parent.width; height: parent.height; border-radius: 9px; border-width: 1px; border-color: #dfe3ed; background: #ffffff;
-            ActionButton { x: 7px; y: 8px; width: 182px; height: 40px; label: "复制原图路径"; quiet: true; enabled: root.loaded && !root.busy; clicked => { helpMenu.close(); root.copy-original-path(); } }
-            ActionButton { x: 7px; y: 52px; width: 202px; height: 40px; label: "复制 Base64 便携数据"; quiet: true; enabled: root.loaded && !root.busy; clicked => { helpMenu.close(); root.copy-portable-data(); } }
+            ActionButton { x: 7px; y: 8px; width: 182px; height: 40px; label: "复制原图路径"; quiet: true; enabled: root.loaded && !root.busy && !root.text-composing; clicked => { helpMenu.close(); root.copy-original-path(); } }
+            ActionButton { x: 7px; y: 52px; width: 202px; height: 40px; label: "复制 Base64 便携数据"; quiet: true; enabled: root.loaded && !root.busy && !root.text-composing; clicked => { helpMenu.close(); root.copy-portable-data(); } }
             ActionButton { x: 7px; y: 96px; width: 202px; height: 40px; label: "打开最近反馈包"; quiet: true; enabled: root.delivery-ready && !root.busy; clicked => { helpMenu.close(); root.open-feedback-folder(); } }
             ActionButton { x: 7px; y: 140px; width: 202px; height: 40px; label: "关于图片反馈"; quiet: true; clicked => { helpMenu.close(); about.show(); } }
         }
@@ -367,17 +481,25 @@ export component AppWindow inherits Window {
     }
     Rectangle {
         x: 0px; y: root.titlebar-height; width: parent.width; height: 64px; background: #ffffff;
-        ActionButton { x: 24px; y: 14px; width: 80px; label: "＋ 新建项目"; enabled: !root.busy; clicked => { root.new-project(); } }
-        ActionButton { x: 112px; y: 14px; width: 88px; label: "导入图片"; enabled: !root.busy; clicked => { root.import-image(); } }
-        ActionButton { x: 208px; y: 14px; width: 76px; label: "打开项目"; quiet: true; enabled: !root.busy; clicked => { root.open-project(); } }
-        Rectangle { x: 296px; y: 20px; width: 1px; height: 24px; background: #e9ecf1; }
-        ActionButton { x: 310px; y: 14px; width: 42px; label: "撤销"; quiet: true; enabled: root.can-undo && !root.busy; clicked => { root.undo(); } }
-        ActionButton { x: 356px; y: 14px; width: 42px; label: "重做"; quiet: true; enabled: root.can-redo && !root.busy; clicked => { root.redo(); } }
-        Rectangle { x: 418px; y: 30px; width: 5px; height: 5px; border-radius: 3px; visible: root.dirty; background: #d2a05b; }
-        Text { x: 430px; y: 22px; width: parent.width - 730px - root.more-button-space; height: 21px; visible: root.dirty; text: "有未保存的修改"; color: #939baa; font-size: 11px; overflow: elide; }
-        ActionButton { x: parent.width - 276px - root.more-button-space; y: 14px; width: 112px; label: "保存项目"; enabled: root.loaded && !root.busy; clicked => { root.save-project(); } }
-        ActionButton { x: parent.width - 152px - root.more-button-space; y: 14px; width: 128px; label: "导出反馈包  ↗"; primary: true; enabled: root.loaded && !root.busy; clicked => { root.export-package(); } }
-        if root.native-chrome : WindowButton { x: parent.width - 60px; y: 16px; kind: 3; description: "更多菜单"; clicked => { helpMenu.show(); } }
+        HorizontalLayout {
+            x: 24px; y: 14px; width: parent.width - 48px; height: 36px; spacing: 12px;
+            fileButtons := HorizontalLayout {
+                spacing: 8px; horizontal-stretch: 0;
+                ActionButton { min-width: 108px; label: "新建项目"; icon: @image-url("../assets/icons/new.svg"); font-size: 13px; shortcut: root.native-chrome ? "⌘N" : "Ctrl+N"; enabled: !root.busy && !root.text-composing; clicked => { root.new-project(); } }
+                ActionButton { min-width: 108px; label: "导入图片"; icon: @image-url("../assets/icons/image.svg"); font-size: 13px; shortcut: root.native-chrome ? "⌘O" : "Ctrl+O"; enabled: !root.busy && !root.text-composing; clicked => { root.import-image(); } }
+                ActionButton { min-width: 108px; label: "打开项目"; icon: @image-url("../assets/icons/open.svg"); font-size: 13px; enabled: !root.busy && !root.text-composing; clicked => { root.open-project(); } }
+            }
+            Rectangle { width: 1px; height: 24px; y: 6px; background: #e9ecf1; }
+            historyButtons := HorizontalLayout {
+                spacing: 8px; horizontal-stretch: 0;
+                ActionButton { width: 36px; label: "撤销"; icon: @image-url("../assets/icons/undo.svg"); icon-only: true; quiet: true; shortcut: root.native-chrome ? "⌘Z" : "Ctrl+Z"; enabled: root.can-undo && !root.busy && !root.text-composing; clicked => { root.undo(); } }
+                ActionButton { width: 36px; label: "重做"; icon: @image-url("../assets/icons/redo.svg"); icon-only: true; quiet: true; shortcut: root.native-chrome ? "⇧⌘Z" : "Ctrl+Shift+Z / Ctrl+Y"; enabled: root.can-redo && !root.busy && !root.text-composing; clicked => { root.redo(); } }
+            }
+            Text { min-width: 0px; horizontal-stretch: 1; text: root.dirty ? "未保存" : ""; color: #8791a1; font-size: 11px; vertical-alignment: center; overflow: elide; }
+            saveProjectButton := ActionButton { min-width: 108px; label: "保存项目"; icon: @image-url("../assets/icons/save.svg"); shortcut: root.native-chrome ? "⌘S" : "Ctrl+S"; enabled: root.loaded && !root.busy && !root.text-composing; clicked => { root.save-project(); } }
+            exportPackageButton := ActionButton { min-width: 124px; label: "导出反馈包"; icon: @image-url("../assets/icons/export.svg"); primary: true; enabled: root.loaded && !root.busy && !root.text-composing; clicked => { root.export-package(); } }
+            if root.native-chrome : WindowButton { kind: 3; description: "更多菜单"; clicked => { helpMenu.show(); } }
+        }
         Rectangle { x: 0px; y: 63px; width: parent.width; height: 1px; background: #e3e7ed; }
     }
 
@@ -397,37 +519,28 @@ export component AppWindow inherits Window {
                 x: 12px;
                 y: 16px;
                 icon: @image-url("../assets/icons/select.svg");
-                label: "选择";
+                label: "选择"; shortcut: "V";
                 active-state: root.tool == 0;
-                enabled: root.loaded && !root.busy;
+                enabled: root.loaded && !root.busy && !root.text-composing;
                 clicked => { root.choose-tool(0); }
             }
             ToolButton {
                 x: 12px;
                 y: 91px;
                 icon: @image-url("../assets/icons/point.svg");
-                label: "点批注";
+                label: "点批注"; shortcut: "P";
                 active-state: root.tool == 1;
-                enabled: root.loaded && !root.busy;
+                enabled: root.loaded && !root.busy && !root.text-composing;
                 clicked => { root.choose-tool(1); }
             }
             ToolButton {
                 x: 12px;
                 y: 166px;
                 icon: @image-url("../assets/icons/pan.svg");
-                label: "平移";
+                label: "平移"; shortcut: "H";
                 active-state: root.tool == 2;
-                enabled: root.loaded && !root.busy;
+                enabled: root.loaded && !root.busy && !root.text-composing;
                 clicked => { root.choose-tool(2); }
-            }
-            Rectangle { x: 22px; y: 247px; width: 28px; height: 1px; background: #e9ecf1; }
-            ToolButton {
-                x: 12px;
-                y: 262px;
-                icon: @image-url("../assets/icons/fit.svg");
-                label: "显示全图";
-                enabled: root.loaded && !root.busy;
-                clicked => { root.fit-view(); }
             }
             Rectangle { x: parent.width - 1px; width: 1px; height: parent.height; background: #e3e7ed; }
         }
@@ -469,7 +582,7 @@ export component AppWindow inherits Window {
                     width: 121px;
                     height: 30px;
                     label: root.smart-enabled ? "智能预选  开" : "智能预选  关";
-                    enabled: !root.busy;
+                    enabled: !root.busy && !root.text-composing;
                     clicked => { root.toggle-smart(); }
                 }
                 Rectangle { y: parent.height - 1px; width: parent.width; height: 1px; background: #e6e9ef; }
@@ -481,7 +594,7 @@ export component AppWindow inherits Window {
                 width: parent.width;
                 height: parent.height - 46px;
                 clip: true;
-                background: #edf0f4;
+                background: #eff1f5;
 
                 if root.loaded : Rectangle {
                     x: root.canvas-x * 1px - 1px;
@@ -583,7 +696,7 @@ export component AppWindow inherits Window {
 
                 canvasKeys := FocusScope {
                     enabled: !root.confirm-visible;
-                    KeyBinding { keys: @keys(Control + V); enabled: !root.busy; activated => { root.paste-image(); } }
+                    KeyBinding { keys: @keys(Control + V); enabled: !root.busy && !root.text-composing; activated => { root.paste-image(); } }
                     KeyBinding { keys: @keys(V); activated => { root.choose-tool(0); } }
                     KeyBinding { keys: @keys(P); activated => { root.choose-tool(1); } }
                     KeyBinding { keys: @keys(H); activated => { root.choose-tool(2); } }
@@ -605,7 +718,7 @@ export component AppWindow inherits Window {
                         return reject;
                     }
                     canvasTouch := TouchArea {
-                        enabled: root.loaded && !root.busy;
+                        enabled: root.loaded && !root.busy && !root.text-composing;
                         changed has-hover => { if !self.has-hover { root.canvas-command("leave"); } }
                         pointer-event(event) => {
                             if event.kind == PointerEventKind.down {
@@ -692,9 +805,9 @@ export component AppWindow inherits Window {
                         y: 241px;
                         width: 132px;
                         height: 40px;
-                        label: "＋ 导入图片";
+                        label: "导入图片"; icon: @image-url("../assets/icons/image.svg");
                         primary: true;
-                        enabled: !root.busy;
+                        enabled: !root.busy && !root.text-composing;
                         clicked => { root.import-image(); }
                     }
                     ActionButton {
@@ -703,7 +816,7 @@ export component AppWindow inherits Window {
                         width: 102px;
                         height: 40px;
                         label: "粘贴图片";
-                        enabled: !root.busy;
+                        enabled: !root.busy && !root.text-composing;
                         clicked => { root.paste-image(); }
                     }
                     ActionButton {
@@ -712,7 +825,7 @@ export component AppWindow inherits Window {
                         width: 122px;
                         height: 40px;
                         label: "打开示例";
-                        enabled: !root.busy;
+                        enabled: !root.busy && !root.text-composing;
                         clicked => { root.load-example(); }
                     }
                 }
@@ -731,7 +844,7 @@ export component AppWindow inherits Window {
                     }
                     ActionButton {
                         x: 4px; y: 4px; width: 30px; height: 30px; label: "−"; quiet: true;
-                        enabled: root.loaded && !root.busy;
+                        enabled: root.loaded && !root.busy && !root.text-composing;
                         clicked => { root.zoom-by(0.8); }
                     }
                     Text {
@@ -741,13 +854,13 @@ export component AppWindow inherits Window {
                     }
                     zoomPlus := ActionButton {
                         x: 102px; y: 4px; width: 30px; height: 30px; label: "＋"; quiet: true;
-                        enabled: root.loaded && !root.busy;
+                        enabled: root.loaded && !root.busy && !root.text-composing;
                         clicked => { root.zoom-by(1.25); }
                     }
                     Rectangle { x: 140px; y: 11px; width: 1px; height: 16px; background: #e5e9ee; }
                     ActionButton {
                         x: 148px; y: 4px; width: 80px; height: 30px; label: "显示全图"; quiet: true;
-                        enabled: root.loaded && !root.busy;
+                        enabled: root.loaded && !root.busy && !root.text-composing;
                         clicked => { root.fit-view(); }
                     }
                 }
@@ -800,7 +913,7 @@ export component AppWindow inherits Window {
             Rectangle {
                 x: 75px;
                 y: 23px;
-                width: 30px;
+                width: root.note-count >= 1000 ? 44px : root.note-count >= 100 ? 36px : 30px;
                 height: 23px;
                 border-radius: 12px;
                 background: #f0f2f6;
@@ -819,7 +932,7 @@ export component AppWindow inherits Window {
                 label: "清空当前";
                 quiet: true;
                 destructive: true;
-                enabled: root.loaded && root.note-count > 0 && !root.busy;
+                enabled: root.loaded && root.note-count > 0 && !root.busy && !root.text-composing;
                 clicked => { root.clear-feedback(); }
             }
             ActionButton {
@@ -827,21 +940,23 @@ export component AppWindow inherits Window {
                 y: 60px;
                 width: 290px;
                 height: 34px;
-                label: "＋ 添加整体意见";
-                enabled: root.loaded && !root.busy;
+                label: "添加整体意见"; icon: @image-url("../assets/icons/new.svg");
+                shortcut: root.note-count >= 1000 ? "已达到 1000 条批注上限" : "";
+                enabled: root.loaded && root.note-count < 1000 && !root.busy && !root.text-composing;
                 clicked => { root.add-global(); }
             }
             Rectangle { x: 20px; y: 108px; width: 290px; height: 1px; background: #edf0f4; }
 
             noteScroll := ScrollView {
-                x: 12px;
+                x: 20px;
                 y: 120px;
-                width: 306px;
+                width: 290px;
                 height: parent.height - 196px;
-                content-width: self.width - 12px;
+                content-width: self.visible-width;
                 noteList := VerticalLayout {
-                    spacing: 10px;
-                    padding: 3px;
+                    spacing: 8px;
+                    padding-top: 12px;
+                    padding-bottom: 12px;
                     for note[index] in root.notes : noteCard := Rectangle {
                         property <bool> editor-focused: false;
                         property <NoteViewState> view-state: {
@@ -849,6 +964,13 @@ export component AppWindow inherits Window {
                             top: noteList.y + self.y, bottom: noteList.y + self.y + self.height,
                             focused: self.editor-focused,
                             active: note.selected && note.id == root.active-note-token,
+                            composing: self.editor-composing,
+                            header-x: header.absolute-position.x + header.width / 2,
+                            header-y: header.absolute-position.y + header.height / 2,
+                            delete-x: deleteNote.absolute-position.x + deleteNote.width / 2,
+                            delete-y: deleteNote.absolute-position.y + deleteNote.height / 2,
+                            editor-x: self.absolute-position.x + self.width / 2,
+                            editor-y: self.absolute-position.y + 96px,
                         };
                         property <int> reveal-request: root.note-reveal-request;
 
@@ -858,7 +980,7 @@ export component AppWindow inherits Window {
                         function reveal-pending() {
                             if self.view-state.active && root.note-reveal-token == note.id
                                 && root.note-reveal-request != root.note-reveal-applied
-                                && !root.confirm-visible && self.y >= 3px {
+                                && !root.confirm-visible && self.y >= 0px {
                                 root.reveal-note-bounds(self.view-state.top, self.view-state.bottom);
                                 root.note-reveal-applied = root.note-reveal-request;
                             }
@@ -866,83 +988,67 @@ export component AppWindow inherits Window {
                         init => { self.publish-state(); self.reveal-pending(); }
                         changed view-state => { self.publish-state(); self.reveal-pending(); }
                         changed reveal-request => { self.reveal-pending(); }
-                        height: note.selected ? 238px : 140px;
-                        border-radius: 9px;
-                        border-width: 1px;
-                        border-color: note.selected ? #c2c6f2 : #e5e9ef;
-                        background: note.selected ? #f9faff : #ffffff;
-                        TouchArea {
-                            enabled: !root.busy;
-                            clicked => { root.select-note(note.id); }
+                        property <bool> editor-composing: false;
+                        property <length> number-width: note.number >= 1000 ? 40px : note.number >= 100 ? 32px : 23px;
+                        height: note.selected ? 88px + note.editor-height * 1px : 48px;
+                        border-radius: 9px; border-width: 1px;
+                        border-color: note.selected ? #cbd5ff : header.hovered ? #cbd3df : #e5e9f0;
+                        background: note.selected ? #f5f7ff : header.hovered ? #f8f9fc : #ffffff;
+                        animate background, border-color { duration: 120ms; }
+                        header := FocusScope {
+                            x: 1px; y: 1px; width: parent.width - 41px; height: 46px;
+                            enabled: !root.busy && !root.confirm-visible && !root.text-composing;
+                            out property <bool> hovered: headerHit.has-hover;
+                            accessible-role: button;
+                            accessible-id: "annotation-" + note.stable-id;
+                            accessible-label: "批注 " + note.number + "，" + note.summary;
+                            accessible-enabled: self.enabled;
+                            accessible-expandable: true;
+                            accessible-expanded: note.selected;
+                            accessible-action-default => { root.select-note(note.id); }
+                            key-pressed(event) => {
+                                if event.text == Key.Return || event.text == " " { root.select-note(note.id); return accept; }
+                                return reject;
+                            }
+                            changed has-focus => { if self.has-focus { root.reveal-note-bounds(noteCard.view-state.top, noteCard.view-state.top + 48px); } }
+                            Rectangle {
+                                width: parent.width; height: parent.height; border-radius: 8px;
+                                background: transparent; border-width: header.has-focus ? 2px : 0px; border-color: #7085eb;
+                            }
+                            headerHit := TouchArea { enabled: parent.enabled; clicked => { root.select-note(note.id); } }
                         }
                         Rectangle {
-                            x: 13px;
-                            y: 14px;
-                            width: 25px;
-                            height: 25px;
-                            border-radius: 13px;
-                            background: #db5147;
-                            Text {
-                                width: parent.width;
-                                height: parent.height;
-                                text: note.number;
-                                color: #ffffff;
-                                font-size: 11px;
-                                font-weight: 700;
-                                horizontal-alignment: center;
-                                vertical-alignment: center;
-                            }
+                            x: 12px; y: 12px; width: noteCard.number-width; height: 23px;
+                            border-radius: 12px; background: #dc2b39;
+                            Text { text: note.number; width: parent.width; height: parent.height; color: #ffffff; font-size: 11px; font-weight: 600; horizontal-alignment: center; vertical-alignment: center; }
                         }
                         Text {
-                            x: 48px;
-                            y: 17px;
-                            width: parent.width - 114px;
-                            height: 20px;
-                            text: note.kind-label;
-                            color: #465166;
-                            font-size: 12px;
-                            font-weight: 600;
-                            overflow: elide;
+                            x: 21px + noteCard.number-width; y: 14px;
+                            width: parent.width - self.x - (note.selected ? 115px : 76px); height: 20px;
+                            text: note.selected ? note.kind-label : note.summary;
+                            color: #354155; font-size: 12px; font-weight: 600; overflow: elide;
                         }
                         if note.selected : Text {
-                            x: parent.width - 59px;
-                            y: 19px;
-                            width: 44px;
-                            height: 17px;
-                            text: "编辑中";
-                            color: #7278bf;
-                            font-size: 10px;
-                            horizontal-alignment: right;
+                            x: parent.width - 113px; y: 16px; width: 40px; height: 17px;
+                            text: "编辑中"; font-size: 10px; color: #7184db; horizontal-alignment: right;
                         }
-                        Text {
-                            x: 14px;
-                            y: 47px;
-                            width: parent.width - 28px;
-                            height: 18px;
-                            text: note.detail;
-                            color: #a0a7b2;
-                            font-size: 10px;
-                            overflow: elide;
+                        Image {
+                            x: parent.width - 67px; y: 17px; width: 14px; height: 14px;
+                            source: note.selected ? @image-url("../assets/icons/chevron-down.svg") : @image-url("../assets/icons/chevron.svg"); colorize: #697487;
                         }
-                        if !note.selected : Text {
-                            x: 14px;
-                            y: 76px;
-                            width: parent.width - 28px;
-                            height: 49px;
-                            text: note.text == "" ? "点击写下这处的修改意见…" : note.text;
-                            color: note.text == "" ? #a3aab5 : #687386;
-                            font-size: 12px;
-                            wrap: word-wrap;
-                            overflow: elide;
+                        deleteNote := ActionButton {
+                            x: parent.width - 39px; y: 8px; width: 32px; height: 32px;
+                            label: "删除批注 " + note.number; icon: @image-url("../assets/icons/trash.svg"); icon-size: 15px;
+                            icon-only: true; quiet: true; destructive: true; enabled: !root.busy && !root.confirm-visible && !root.text-composing;
+                            clicked => { root.remove-note(note.id); }
                         }
-                        if note.selected : TextEdit {
-                            x: 13px;
-                            y: 75px;
-                            width: parent.width - 26px;
-                            height: 112px;
-                            text: note.text;
-                            enabled: !root.busy && !root.confirm-visible;
-                            placeholder-text: "写下这处的修改意见…";
+                        if note.selected : Text {
+                            x: 12px; y: 48px; width: parent.width - 24px; height: 17px;
+                            text: note.detail; color: #8791a1; font-size: 11px; overflow: elide;
+                        }
+                        if note.selected : editor := NoteEditor {
+                            x: 12px; y: 76px; width: parent.width - 24px; height: note.editor-height * 1px;
+                            text: note.text; enabled: !root.busy && !root.confirm-visible;
                             property <bool> was-focused: false;
                             property <int> focus-request: root.note-reveal-applied;
                             changed focus-request => {
@@ -957,34 +1063,20 @@ export component AppWindow inherits Window {
                                 if self.has-focus { self.was-focused = true; }
                                 else if self.was-focused && !root.confirm-visible { root.note-edit-finished(note.id); }
                             }
-                            edited => { root.note-edited(note.id, self.text); }
+                            changed composing => { noteCard.editor-composing = self.composing; }
+                            edited(text) => { root.note-edited(note.id, text); }
                             key-pressed(event) => {
                                 if root.confirm-visible { return accept; }
                                 if event.text == Key.Escape { root.canvas-command("cancel-text"); canvasKeys.focus(); return accept; }
-                                if event.modifiers.control && event.text == Key.Return { root.canvas-command("finish-text"); canvasKeys.focus(); return accept; }
+                                if event.modifiers.control && event.text == Key.Return {
+                                    root.canvas-command("finish-text");
+                                    if !root.confirm-visible { canvasKeys.focus(); }
+                                    return accept;
+                                }
                                 return reject;
                             }
                         }
-                        if note.selected : ActionButton {
-                            x: 11px;
-                            y: 200px;
-                            width: 48px;
-                            height: 27px;
-                            label: "删除";
-                            quiet: true;
-                            destructive: true;
-                            enabled: !root.busy;
-                            clicked => { root.remove-note(note.id); }
-                        }
-                        if note.selected : ActionButton {
-                            x: parent.width - 73px;
-                            y: 199px;
-                            width: 60px;
-                            height: 28px;
-                            label: "完成";
-                            enabled: !root.busy;
-                            clicked => { root.canvas-command("finish-text"); canvasKeys.focus(); }
-                        }
+
                     }
                 }
             }
@@ -1034,10 +1126,13 @@ export component AppWindow inherits Window {
                     width: 290px;
                     height: 36px;
                     label: root.copy-complete ? "已复制" : "复制反馈说明";
-                    enabled: root.loaded && root.note-count > 0 && !root.busy;
+                    icon: @image-url("../assets/icons/copy.svg");
+                    accessible-description: "复制本机原图路径和修改意见；跨设备需另附原图或反馈包。";
+                    enabled: root.loaded && root.note-count > 0 && !root.busy && !root.text-composing;
                     clicked => { root.copy-feedback(); }
                 }
-                if copyFeedback.hovered && !root.confirm-visible : Rectangle {
+                Rectangle { x: 0px; y: 0px; width: parent.width; height: 1px; background: #edf0f4; }
+                if (copyFeedback.hovered || copyFeedback.focused) && !root.confirm-visible : Rectangle {
                     x: 20px; y: -58px; width: 290px; height: 64px;
                     border-radius: 8px; border-width: 1px; border-color: #dfe3ed;
                     background: #ffffff;
@@ -1067,8 +1162,9 @@ export component AppWindow inherits Window {
         }
         Text { x: 55px; y: 14px; width: parent.width - 92px; height: 24px; text: root.toast-title; color: #29384b; font-size: 14px; font-weight: 600; }
         Text { x: 55px; y: 40px; width: parent.width - 75px; height: 35px; text: root.toast-message; color: #7b8595; font-size: 11px; wrap: word-wrap; overflow: elide; }
-        Text { x: parent.width - 29px; y: 12px; width: 18px; height: 18px; text: "×"; color: #9ba3b1; font-size: 15px; horizontal-alignment: center; vertical-alignment: center;
-            TouchArea { clicked => { root.dismiss-toast(); } }
+        ActionButton { x: parent.width - 38px; y: 7px; width: 32px; height: 32px;
+            label: "关闭提示"; icon: @image-url("../assets/icons/close.svg"); icon-size: 15px; icon-only: true; quiet: true;
+            clicked => { root.dismiss-toast(); }
         }
     }
     Rectangle { x: 0px; y: 0px; width: parent.width; height: parent.height; background: transparent; border-color: #dfe3eb; border-width: 1px; }

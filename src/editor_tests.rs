@@ -1,5 +1,83 @@
 use super::*;
 #[test]
+fn note_rows_reconcile_by_stable_id_when_display_numbers_shift() {
+    let row = |stable: &str, token: i32| NoteRow {
+        stable_id: stable.into(),
+        id: token,
+        number: token,
+        ..Default::default()
+    };
+    let model = VecModel::from(vec![
+        row("large-10", 1),
+        row("large-20", 2),
+        row("large-30", 3),
+    ]);
+    reconcile_note_rows(&model, vec![row("large-20", 1), row("large-30", 2)]);
+    assert_eq!(model.row_count(), 2);
+    assert_eq!(model.row_data(0).unwrap().stable_id, "large-20");
+    assert_eq!(model.row_data(1).unwrap().number, 2);
+    reconcile_note_rows(
+        &model,
+        vec![row("large-10", 1), row("large-20", 2), row("large-30", 3)],
+    );
+    assert_eq!(model.row_count(), 3);
+    assert_eq!(model.row_data(1).unwrap().stable_id, "large-20");
+    assert_eq!(model.row_data(1).unwrap().number, 2);
+}
+#[test]
+fn note_toggle_commits_the_draft_once_then_collapses() {
+    let mut e = editor();
+    e.selected = Some(1);
+    e.pending = Some((1, "收起前提交的意见".into()));
+    e.toggle_note(1).unwrap();
+    assert!(e.selected.is_none());
+    assert!(e.pending.is_none());
+    assert_eq!(
+        e.doc().unwrap().annotation(1).unwrap().text,
+        "收起前提交的意见"
+    );
+    assert!(e.history.as_mut().unwrap().undo());
+    assert_eq!(e.doc().unwrap().annotation(1).unwrap().text, "");
+    assert!(!e.history.as_ref().unwrap().can_undo());
+}
+
+#[test]
+fn invalid_draft_blocks_collapse_and_selection_changes() {
+    let mut e = editor();
+    let second = e
+        .history
+        .as_mut()
+        .unwrap()
+        .apply(Document::add_global)
+        .unwrap();
+    e.selected = Some(1);
+    let draft = "字".repeat(20_001);
+    e.pending = Some((1, draft.clone()));
+    assert!(e.toggle_note(1).is_err());
+    assert_eq!(e.selected, Some(1));
+    assert!(e.toggle_note(second).is_err());
+    assert_eq!(e.selected, Some(1));
+    assert_eq!(e.pending.as_ref().unwrap().1, draft);
+}
+
+#[test]
+fn summary_is_a_single_line_view_without_changing_the_original() {
+    let original = "  完整意见\n\t保留第二行　中文空格  ";
+    assert_eq!(note_summary(original), "完整意见 保留第二行 中文空格");
+    assert_eq!(note_summary(" \n\t　"), "未填写意见");
+    assert!(original.contains('\n'));
+}
+
+#[test]
+fn toggling_an_unchanged_note_does_not_add_history() {
+    let mut e = editor();
+    e.toggle_note(1).unwrap();
+    assert_eq!(e.selected, Some(1));
+    e.toggle_note(1).unwrap();
+    assert_eq!(e.selected, None);
+    assert!(!e.history.as_ref().unwrap().can_undo());
+}
+#[test]
 fn clear_feedback_keeps_image_project_and_view_and_undo_restores_all_edits() {
     let mut e = editor();
     e.history

@@ -47,6 +47,335 @@ fn require(condition: bool, error: &str) -> Result<(), String> {
     if condition { Ok(()) } else { Err(error.into()) }
 }
 
+/// 对齐网页版的窗口回归：使用隔离数据和真实 Slint 场景输入，不触碰系统剪贴板。
+pub(super) fn start_alignment(
+    ui: &AppWindow,
+    state: &Rc<RefCell<Editor>>,
+    timer: &Rc<slint::Timer>,
+    folder: PathBuf,
+    failure: Rc<RefCell<Option<String>>>,
+) {
+    let result = (|| -> Result<(), String> {
+        std::fs::create_dir_all(&folder).map_err(|e| e.to_string())?;
+        let (mut doc, bytes, name) = {
+            let e = state.borrow();
+            let asset = e.asset.as_ref().ok_or("alignment image missing")?;
+            (
+                e.doc().unwrap().clone(),
+                asset.original.clone(),
+                asset.name.clone(),
+            )
+        };
+        ui.invoke_new_project();
+        save_window_snapshot(ui, &folder.join("empty.png"))?;
+        let region = doc.add_region(Rect {
+            x: 48.,
+            y: 199.,
+            width: 510.,
+            height: 158.,
+        })?;
+        doc.set_text(
+            region,
+            "将按钮改为统一描边样式，并调整间距与文字层级".into(),
+        )?;
+        let block = doc.add_region(Rect {
+            x: 780.,
+            y: 363.,
+            width: 300.,
+            height: 286.,
+        })?;
+        doc.move_annotation(block, 30., 15.)?;
+        doc.set_text(block, "主视觉向右移动，保留标题空间".into())?;
+        let point = doc.add_point(Point { x: 272., y: 495. })?;
+        doc.set_text(point, "按钮颜色更醒目".into())?;
+        let global = doc.add_global()?;
+        doc.set_text(global, "保持整体简洁，突出主要操作".into())?;
+        let asset = Asset::from_bytes(bytes, name)?;
+        let thumb = preview(&asset);
+        install(ui, &mut state.borrow_mut(), doc, asset, None, thumb);
+        timer.restart();
+        ui.invoke_select_note(1);
+        Ok(())
+    })();
+    if let Err(error) = result {
+        fail(ui, &folder, &failure, error);
+        return;
+    }
+    alignment_poll(
+        ui.as_weak(),
+        state.clone(),
+        timer.clone(),
+        folder,
+        failure,
+        0,
+        Instant::now() + Duration::from_secs(20),
+    );
+}
+
+fn alignment_poll(
+    weak: slint::Weak<AppWindow>,
+    state: Rc<RefCell<Editor>>,
+    timer: Rc<slint::Timer>,
+    folder: PathBuf,
+    failure: Rc<RefCell<Option<String>>>,
+    stage: u8,
+    deadline: Instant,
+) {
+    slint::Timer::single_shot(Duration::from_millis(70), move || {
+        let Some(ui) = weak.upgrade() else {
+            return;
+        };
+        ui.window()
+            .dispatch_event(slint::platform::WindowEvent::WindowActiveChanged(true));
+        if !ui.get_active_note_visible() {
+            if Instant::now() >= deadline {
+                let _ = save_window_snapshot(&ui, &folder.join("failed-window.png"));
+                fail(
+                    &ui,
+                    &folder,
+                    &failure,
+                    format!(
+                        "alignment stage {stage} did not reveal the active note: top={}, bottom={}, scroll={}, viewport={}",
+                        ui.get_active_note_top(),
+                        ui.get_active_note_bottom(),
+                        ui.get_note_scroll_y(),
+                        ui.get_notes_viewport_height(),
+                    ),
+                );
+            } else {
+                alignment_poll(weak, state, timer, folder, failure, stage, deadline);
+            }
+            return;
+        }
+        let result = (|| -> Result<(), String> {
+            match stage {
+                0 => {
+                    save_window_snapshot(&ui, &folder.join("expanded.png"))?;
+                    let (x, y) = (ui.get_active_note_header_x(), ui.get_active_note_header_y());
+                    window_pointer_click(
+                        &ui,
+                        ui.get_active_note_editor_x(),
+                        ui.get_active_note_editor_y(),
+                    );
+                    shortcut(&ui, "a", false);
+                    key(&ui, "首轮草稿，收起时提交".into());
+                    window_pointer_click(&ui, x, y);
+                    require(
+                        state.borrow().selected.is_none() && state.borrow().pending.is_none(),
+                        "header collapse did not finish the text draft",
+                    )?;
+                    require(
+                        state.borrow().doc().unwrap().annotations[0].text == "首轮草稿，收起时提交",
+                        "collapsing lost typed feedback",
+                    )?;
+                    save_window_snapshot(&ui, &folder.join("collapsed.png"))?;
+                    window_pointer_click(&ui, x, y);
+                }
+                1 => {
+                    shortcut(&ui, "a", false);
+                    key(&ui, "后续".into());
+                    ui.invoke_fit_view();
+                    key(&ui, "继续".into());
+                    require(
+                        state
+                            .borrow()
+                            .pending
+                            .as_ref()
+                            .is_some_and(|(_, text)| text == "后续继续"),
+                        "ordinary model sync reset the editor caret",
+                    )?;
+                    key(&ui, slint::platform::Key::Delete.into());
+                    key(&ui, slint::platform::Key::Backspace.into());
+                    require(
+                        state.borrow().doc().unwrap().annotations.len() == 4,
+                        "text deletion removed an annotation",
+                    )?;
+                    key(&ui, slint::platform::Key::Escape.into());
+                    require(
+                        state.borrow().pending.is_none()
+                            && state.borrow().doc().unwrap().annotations[0].text == "后续",
+                        "Escape failed to cancel only the pending text",
+                    )?;
+                    window_pointer_click(
+                        &ui,
+                        ui.get_active_note_editor_x(),
+                        ui.get_active_note_editor_y(),
+                    );
+                    shortcut(&ui, "a", false);
+                    key(&ui, "提交并结束".into());
+                    let enter: slint::SharedString = slint::platform::Key::Return.into();
+                    shortcut(&ui, enter.as_str(), false);
+                    require(
+                        state.borrow().selected.is_none() && state.borrow().pending.is_none(),
+                        "Ctrl/Command+Enter did not finish editing",
+                    )?;
+                    require(
+                        state.borrow().doc().unwrap().annotations[0].text == "提交并结束",
+                        "finishing editing lost text",
+                    )?;
+                    ui.invoke_select_note(1);
+                }
+                2 => {
+                    shortcut(&ui, "a", false);
+                    key(&ui, "字".repeat(20_001).into());
+                    let enter: slint::SharedString = slint::platform::Key::Return.into();
+                    shortcut(&ui, enter.as_str(), false);
+                    require(
+                        ui.get_confirm_visible() && ui.get_confirm_has_focus(),
+                        "failed Ctrl/Command+Enter moved focus behind the error dialog",
+                    )?;
+                    primary(&ui);
+                    window_pointer_click(
+                        &ui,
+                        ui.get_active_note_header_x(),
+                        ui.get_active_note_header_y(),
+                    );
+                    require(
+                        ui.get_confirm_visible() && state.borrow().selected == Some(1),
+                        "invalid draft did not block collapse",
+                    )?;
+                    require(
+                        state
+                            .borrow()
+                            .pending
+                            .as_ref()
+                            .is_some_and(|(_, text)| text.chars().count() == 20_001),
+                        "invalid draft was discarded",
+                    )?;
+                    save_window_snapshot(&ui, &folder.join("draft-error.png"))?;
+                    primary(&ui);
+                }
+                3 => {
+                    ui.invoke_copy_feedback();
+                    require(
+                        ui.get_toast_visible()
+                            && !ui.get_toast_success()
+                            && state.borrow().pending.is_some(),
+                        "copy validation did not keep the draft and report failure",
+                    )?;
+                    save_window_snapshot(&ui, &folder.join("copy-error.png"))?;
+                    ui.invoke_dismiss_toast();
+                    shortcut(&ui, "a", false);
+                    key(&ui, "修正后的意见".into());
+                    require(
+                        state
+                            .borrow()
+                            .pending
+                            .as_ref()
+                            .is_some_and(|(_, text)| text == "修正后的意见"),
+                        "validation failure did not restore the note editor focus",
+                    )?;
+                    let (x, y) = (ui.get_active_note_delete_x(), ui.get_active_note_delete_y());
+                    window_pointer_click(
+                        &ui,
+                        ui.get_active_note_header_x(),
+                        ui.get_active_note_header_y(),
+                    );
+                    window_pointer_click(&ui, x, y);
+                    require(
+                        ui.get_confirm_visible()
+                            && ui.get_confirm_choice() == 0
+                            && state.borrow().selected.is_none(),
+                        "collapsed delete did not use an independent target and safe confirmation",
+                    )?;
+                    cancel(&ui);
+                    require(
+                        state.borrow().doc().unwrap().annotations.len() == 4,
+                        "cancelling deletion changed data",
+                    )?;
+                    window_pointer_click(&ui, x, y);
+                    primary(&ui);
+                    require(
+                        state.borrow().doc().unwrap().annotations.len() == 3,
+                        "header delete did not remove the note",
+                    )?;
+                    shortcut(&ui, "z", false);
+                    require(
+                        state.borrow().doc().unwrap().annotations.len() == 4,
+                        "header deletion could not be undone",
+                    )?;
+                    let mut doc = {
+                        let e = state.borrow();
+                        let image = &e.doc().unwrap().image;
+                        Document::new(image.file_name.clone(), image.width, image.height)?
+                    };
+                    for index in 1..=1000 {
+                        let id = doc.add_global()?;
+                        if index == 1000 {
+                            doc.set_text(id, "长意见完整保留，收起时仅显示摘要。".repeat(180))?;
+                        }
+                    }
+                    let mut e = state.borrow_mut();
+                    e.history = Some(History::new(doc.clone()));
+                    e.saved = Some(doc);
+                    e.selected = Some(1000);
+                    e.revealed_selection = None;
+                    sync(&ui, &mut e);
+                }
+                4 => {
+                    require(
+                        ui.get_note_count() == 1000
+                            && ui
+                                .get_notes()
+                                .row_data(999)
+                                .is_some_and(|row| row.number == 1000),
+                        "1000-note numbering was truncated",
+                    )?;
+                    save_window_snapshot(&ui, &folder.join("thousand-notes.png"))?;
+                    // 显式按 Slint 缩放换成物理尺寸，避免环境覆盖缩放时后端仍用系统比例。
+                    ui.window().set_size(
+                        slint::LogicalSize::new(1000., 688.)
+                            .to_physical(ui.window().scale_factor()),
+                    );
+                }
+                5 => {
+                    save_window_snapshot(&ui, &folder.join("minimum-window.png"))?;
+                    let actual = ui.window().size().to_logical(ui.window().scale_factor());
+                    require(
+                        (actual.width - 1000.).abs() <= 1. && (actual.height - 688.).abs() <= 1.,
+                        "minimum-window test did not reach 1000x688 logical pixels",
+                    )?;
+                    require(
+                        ui.get_toolbar_fits(),
+                        "minimum window overlaps file/history/save/export controls",
+                    )?;
+                    require(
+                        ui.get_active_note_visible() && ui.get_viewport_width() >= 500.,
+                        "minimum window clipped the active editor or canvas",
+                    )?;
+                    ui.invoke_focus_copy();
+                    require(
+                        ui.get_copy_help_visible(),
+                        "cross-device copy help was not keyboard discoverable",
+                    )?;
+                    save_window_snapshot(&ui, &folder.join("keyboard-copy-help.png"))?;
+                    std::fs::write(folder.join("ui-report.json"), serde_json::to_vec_pretty(&serde_json::json!({
+                        "result":"passed", "platform":std::env::consts::OS,
+                        "method":"real Slint window, scene-dispatched keyboard/pointer events, isolated data and clipboard; not physical IME or screen-reader certification",
+                        "checks":["collapsed/expanded rows and header toggle", "collapse commits drafts", "model sync preserves caret", "Delete/Backspace edit text only", "Escape cancels pending text", "Ctrl/Command+Enter commits and closes", "invalid text blocks collapse and restores focus", "copy failure preserves the draft", "independent collapsed delete, safe default, cancel and undo", "1000 notes with full text retained", "1000x688 logical window", "keyboard discoverable cross-device help"]
+                    })).unwrap()).map_err(|e| e.to_string())?;
+                    let _ = ui.hide();
+                    return Ok(());
+                }
+                _ => unreachable!(),
+            }
+            alignment_poll(
+                ui.as_weak(),
+                state.clone(),
+                timer.clone(),
+                folder.clone(),
+                failure.clone(),
+                stage + 1,
+                Instant::now() + Duration::from_secs(20),
+            );
+            Ok(())
+        })();
+        if let Err(error) = result {
+            fail(&ui, &folder, &failure, error);
+        }
+    });
+}
+
 pub(super) fn start(
     ui: &AppWindow,
     state: &Rc<RefCell<Editor>>,

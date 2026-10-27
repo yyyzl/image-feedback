@@ -183,6 +183,18 @@ impl Default for Editor {
     }
 }
 impl Editor {
+    fn toggle_note(&mut self, id: u64) -> Result<(), String> {
+        self.flush()?;
+        if self.doc().is_some_and(|doc| doc.annotation(id).is_some()) {
+            self.selected = if self.selected == Some(id) {
+                None
+            } else {
+                Some(id)
+            };
+            self.revealed_selection = None;
+        }
+        Ok(())
+    }
     fn clear_feedback(&mut self) -> Result<(), String> {
         self.flush()?;
         if let Some(history) = self.history.as_mut() {
@@ -480,6 +492,14 @@ fn ui_note_id(e: &Editor, token: i32) -> Option<u64> {
         return None;
     }
     e.doc()?.annotations.get((token - 1) as usize).map(|a| a.id)
+}
+fn note_summary(text: &str) -> String {
+    let summary = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    if summary.is_empty() {
+        "未填写意见".into()
+    } else {
+        summary
+    }
 }
 fn ui_token(e: &Editor, id: u64) -> i32 {
     e.doc()
@@ -861,8 +881,8 @@ fn sync(ui: &AppWindow, e: &mut Editor) {
                 true,
             ),
             AnnotationKind::Global => (
-                "全局意见",
-                String::new(),
+                "整体意见",
+                "应用到整张图片".into(),
                 Rect {
                     x: 0.,
                     y: 0.,
@@ -886,11 +906,19 @@ fn sync(ui: &AppWindow, e: &mut Editor) {
                 .filter(|(id, _)| *id == a.id)
                 .map(|(_, text)| text.clone())
                 .unwrap_or_else(|| a.text.clone());
+            let summary = note_summary(&text);
+            let lines = text
+                .lines()
+                .map(|line| line.chars().count().div_ceil(22).max(1))
+                .sum::<usize>();
             notes.push(NoteRow {
                 id: index as i32 + 1,
+                stable_id: a.id.to_string().into(),
                 number: index as i32 + 1,
                 kind_label: kind.into(),
                 text: text.into(),
+                summary: summary.into(),
+                editor_height: (lines.max(4).min(8) * 18 + 20).min(164) as f32,
                 selected,
                 detail: detail.into(),
             });
@@ -923,8 +951,13 @@ fn sync(ui: &AppWindow, e: &mut Editor) {
         }
     }
     // Preserve the text editor instance/caret when only canvas geometry changes.
-    if refresh_notes && ui.get_notes().iter().collect::<Vec<_>>() != notes {
-        ui.set_notes(ModelRc::new(VecModel::from(notes)));
+    if refresh_notes {
+        let current = ui.get_notes();
+        if let Some(model) = current.as_any().downcast_ref::<VecModel<NoteRow>>() {
+            reconcile_note_rows(model, notes);
+        } else {
+            ui.set_notes(ModelRc::new(VecModel::from(notes)));
+        }
     }
     ui.set_marks(ModelRc::new(VecModel::from(marks)));
     if refresh_notes {
@@ -943,6 +976,34 @@ fn sync(ui: &AppWindow, e: &mut Editor) {
                 });
             }
         }
+    }
+}
+fn reconcile_note_rows(model: &VecModel<NoteRow>, rows: Vec<NoteRow>) {
+    let count = rows.len();
+    for (index, row) in rows.into_iter().enumerate() {
+        if model
+            .row_data(index)
+            .is_some_and(|old| old.stable_id == row.stable_id)
+        {
+            if model.row_data(index).as_ref() != Some(&row) {
+                model.set_row_data(index, row);
+            }
+        } else if let Some(existing) = (index..model.row_count()).find(|position| {
+            model
+                .row_data(*position)
+                .is_some_and(|old| old.stable_id == row.stable_id)
+        }) {
+            // 移除前面的条目时移动现有实例，保留后续编辑器和光标。
+            for _ in index..existing {
+                model.remove(index);
+            }
+            model.set_row_data(index, row);
+        } else {
+            model.insert(index, row);
+        }
+    }
+    while model.row_count() > count {
+        model.remove(count);
     }
 }
 fn perform_action(ui: &AppWindow, e: &mut Editor, timer: &Rc<slint::Timer>, action: PendingAction) {
@@ -968,6 +1029,10 @@ fn perform_action(ui: &AppWindow, e: &mut Editor, timer: &Rc<slint::Timer>, acti
     }
 }
 fn begin_action(ui: &AppWindow, e: &mut Editor, timer: &Rc<slint::Timer>, action: PendingAction) {
+    if ui.get_text_composing() {
+        set_status(ui, "请先确认或取消输入法候选，再继续操作");
+        return;
+    }
     if e.worker.is_some() {
         set_status(ui, "请等待当前任务完成后再继续");
         return;
@@ -1655,7 +1720,10 @@ fn run_editor(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
         .open(app_dir().join("editor.lock"))?;
     if lock.try_lock().is_err() {
         if args.iter().any(|arg| {
-            arg == "--smoke-test" || arg == "--dialog-smoke" || arg == "--delivery-smoke"
+            arg == "--smoke-test"
+                || arg == "--dialog-smoke"
+                || arg == "--delivery-smoke"
+                || arg == "--ui-smoke"
         }) {
             return Err("请关闭现有编辑器后再运行窗口自检（未修改现有进程）".into());
         }
@@ -1673,7 +1741,10 @@ fn run_editor(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
     let activation_server = platform::start_activation_server(ui.as_weak())?;
     let editor = Rc::new(RefCell::new(Editor {
         clipboard_probe: args.iter().any(|arg| {
-            arg == "--smoke-test" || arg == "--dialog-smoke" || arg == "--delivery-smoke"
+            arg == "--smoke-test"
+                || arg == "--dialog-smoke"
+                || arg == "--delivery-smoke"
+                || arg == "--ui-smoke"
         }),
         ..Editor::default()
     }));
@@ -1757,7 +1828,7 @@ fn run_editor(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
             }
             if command == "cancel-text" {
                 e.pending = None;
-                // Reset the TextEdit's local value too, not just the Rust transaction.
+                // 同时恢复输入框的本地值，避免只清除 Rust 草稿后旧文字仍留在界面。
                 ui.set_notes(ModelRc::default());
                 sync(&ui, &mut e);
                 return;
@@ -2211,13 +2282,20 @@ fn run_editor(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
                 return;
             };
             let mut e = state.borrow_mut();
-            if let Err(err) = e.flush() {
+            if e.worker.is_some() || e.confirmation.is_some() || e.message.is_some() {
+                return;
+            }
+            let Some(actual) = ui_note_id(&e, id) else {
+                return;
+            };
+            if let Err(err) = e.toggle_note(actual) {
                 show_message(&ui, &mut e, "无法完成操作", err);
                 return;
             }
-            e.selected = ui_note_id(&e, id);
-            e.revealed_selection = None;
             sync(&ui, &mut e);
+            if e.selected.is_none() {
+                ui.invoke_focus_canvas();
+            }
         });
     }
     {
@@ -2557,6 +2635,10 @@ fn run_editor(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
                 return slint::CloseRequestResponse::KeepWindowShown;
             };
             e.close_requests = e.close_requests.wrapping_add(1);
+            if ui.get_text_composing() {
+                set_status(&ui, "请先确认或取消输入法候选，再关闭窗口");
+                return slint::CloseRequestResponse::KeepWindowShown;
+            }
             if e.worker.is_some() {
                 set_status(&ui, "请等待当前保存／导出完成后再关闭");
                 return slint::CloseRequestResponse::KeepWindowShown;
@@ -2581,9 +2663,9 @@ fn run_editor(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
     set_status(&ui, "本地处理 · 不联网 · 原图保持不变");
     ui.show()?;
     // Startup loading happens once, after the real viewport has been laid out.
-    let smoke = args
-        .iter()
-        .any(|a| a == "--smoke-test" || a == "--dialog-smoke" || a == "--delivery-smoke");
+    let smoke = args.iter().any(|a| {
+        a == "--smoke-test" || a == "--dialog-smoke" || a == "--delivery-smoke" || a == "--ui-smoke"
+    });
     let demo = smoke || args.iter().any(|a| a == "--demo");
     let input = args
         .iter()
@@ -2716,6 +2798,25 @@ fn run_editor(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
             },
         );
     }
+    if let Some(index) = args.iter().position(|arg| arg == "--ui-smoke") {
+        let folder = args
+            .get(index + 1)
+            .map(PathBuf::from)
+            .unwrap_or_else(|| PathBuf::from("artifacts/ui-smoke"));
+        let state = editor.clone();
+        let t = timer.clone();
+        let failure = smoke_result.clone();
+        smoke_ready::start(
+            ui.as_weak(),
+            state.clone(),
+            folder.clone(),
+            failure.clone(),
+            Duration::from_secs(2),
+            move |ui| {
+                dialog_smoke::start_alignment(ui, &state, &t, folder, failure);
+            },
+        );
+    }
     slint::run_event_loop()?;
     timer.stop();
     #[cfg(target_os = "macos")]
@@ -2740,6 +2841,15 @@ fn run_editor(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
             .unwrap_or_else(|| PathBuf::from("artifacts/delivery-smoke"));
         if !folder.join("delivery-report.json").is_file() {
             return Err("窗口在图片交付回归完成前退出".into());
+        }
+    }
+    if let Some(index) = args.iter().position(|arg| arg == "--ui-smoke") {
+        let folder = args
+            .get(index + 1)
+            .map(PathBuf::from)
+            .unwrap_or_else(|| PathBuf::from("artifacts/ui-smoke"));
+        if !folder.join("ui-report.json").is_file() {
+            return Err("窗口在界面对齐回归完成前退出".into());
         }
     }
     Ok(())
@@ -2783,9 +2893,9 @@ fn main() {
         }
     }
     let _installation_guard = platform::installation_guard();
-    let smoke = args
-        .iter()
-        .any(|a| a == "--smoke-test" || a == "--dialog-smoke" || a == "--delivery-smoke");
+    let smoke = args.iter().any(|a| {
+        a == "--smoke-test" || a == "--dialog-smoke" || a == "--delivery-smoke" || a == "--ui-smoke"
+    });
     let result = if smoke
         || args
             .iter()

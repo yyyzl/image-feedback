@@ -110,9 +110,7 @@ pub(super) fn finish(
             };
             set_status(ui, title);
             show_toast(ui, timer, true, title, message);
-            if request == CopyRequest::OriginalPath {
-                ui.set_copy_complete(false);
-            }
+            ui.set_copy_complete(request == CopyRequest::Feedback);
         }
         Err(error) => {
             set_status(ui, format!("复制失败：{error}"));
