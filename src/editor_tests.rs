@@ -1,5 +1,35 @@
 use super::*;
 #[test]
+fn two_axis_pan_and_reset_only_change_the_view() {
+    let mut e = editor();
+    e.fit(800., 600.);
+    let original = e.doc().unwrap().clone();
+    let scale = e.view.scale;
+    assert!(!e.can_reset_view(800., 600.));
+    e.pan_view(35., -24.);
+    assert_eq!(e.view.scale, scale);
+    assert!(e.can_reset_view(800., 600.));
+    assert_eq!(e.doc(), Some(&original));
+    assert!(!e.dirty() && !e.history.as_ref().unwrap().can_undo());
+    e.pan_view(-35., 24.);
+    assert!(!e.can_reset_view(800., 600.));
+    e.view.scale *= 1.25;
+    assert!(e.can_reset_view(800., 600.));
+    e.fit(800., 600.);
+    assert!(!e.can_reset_view(800., 600.));
+    e.pan_view(f32::INFINITY, 10.);
+    assert!(!e.can_reset_view(800., 600.));
+}
+#[test]
+fn continuous_input_is_not_guessed_from_small_wheel_deltas() {
+    use slint::winit_030::winit::{dpi::PhysicalPosition, event::MouseScrollDelta};
+    assert!(continuous_scroll(&MouseScrollDelta::PixelDelta(
+        PhysicalPosition::new(-3., 8.)
+    )));
+    assert!(!continuous_scroll(&MouseScrollDelta::LineDelta(0., 1.)));
+    assert!(!continuous_scroll(&MouseScrollDelta::LineDelta(0., 0.01)));
+}
+#[test]
 fn note_rows_reconcile_by_stable_id_when_display_numbers_shift() {
     let row = |stable: &str, token: i32| NoteRow {
         stable_id: stable.into(),

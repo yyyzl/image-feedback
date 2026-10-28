@@ -2380,6 +2380,8 @@ dependencies = [
  "slint",
  "slint-build",
  "tray-icon",
+ "windows",
+ "windows-core",
  "winit",
  "winresource",
  "zip",

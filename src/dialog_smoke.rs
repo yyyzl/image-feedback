@@ -150,6 +150,7 @@ fn alignment_poll(
         let result = (|| -> Result<(), String> {
             match stage {
                 0 => {
+                    canvas_input_checks(&ui, &state, &folder)?;
                     save_window_snapshot(&ui, &folder.join("expanded.png"))?;
                     let (x, y) = (ui.get_active_note_header_x(), ui.get_active_note_header_y());
                     window_pointer_click(
@@ -387,6 +388,101 @@ fn alignment_poll(
     });
 }
 
+fn canvas_input_checks(
+    ui: &AppWindow,
+    state: &Rc<RefCell<Editor>>,
+    folder: &Path,
+) -> Result<(), String> {
+    use slint::platform::WindowEvent;
+    ui.invoke_fit_view();
+    let original = state.borrow().doc().unwrap().clone();
+    let initial = state.borrow().view;
+    require(
+        !ui.get_can_reset_view(),
+        "initial view showed a reset action",
+    )?;
+    let x = ui.get_viewport_width() * 0.35;
+    let y = ui.get_viewport_height() * 0.6;
+    let position =
+        slint::LogicalPosition::new(ui.get_canvas_window_x() + x, ui.get_canvas_window_y() + y);
+    require(
+        ui.invoke_canvas_accepts_scroll(position.x, position.y),
+        "canvas gesture hit region is unavailable",
+    )?;
+    ui.set_touchpad_scroll(true);
+    ui.window()
+        .dispatch_event(WindowEvent::PointerMoved { position });
+    ui.window().dispatch_event(WindowEvent::PointerScrolled {
+        position,
+        delta_x: 36.,
+        delta_y: -24.,
+    });
+    {
+        let e = state.borrow();
+        require(
+            (e.view.x - initial.x - 36.).abs() < 0.01
+                && (e.view.y - initial.y + 24.).abs() < 0.01
+                && e.view.scale == initial.scale,
+            "touchpad scroll did not pan both axes at unchanged scale",
+        )?;
+        require(
+            e.doc() == Some(&original) && !e.dirty(),
+            "view gesture changed document data",
+        )?;
+    }
+    require(ui.get_can_reset_view(), "panned view did not offer reset")?;
+    save_window_snapshot(ui, &folder.join("touchpad-pan.png"))?;
+    ui.set_touchpad_scroll(false);
+    let anchor = state.borrow().point(x, y);
+    ui.window().dispatch_event(WindowEvent::PointerScrolled {
+        position,
+        delta_x: 0.,
+        delta_y: 60.,
+    });
+    {
+        let e = state.borrow();
+        let after = e.point(x, y);
+        require(
+            e.view.scale > initial.scale
+                && (anchor.x - after.x).abs() < 0.01
+                && (anchor.y - after.y).abs() < 0.01,
+            "mouse wheel did not zoom around the pointer",
+        )?;
+    }
+    save_window_snapshot(ui, &folder.join("wheel-zoom.png"))?;
+    let before = state.borrow().view;
+    ui.set_touchpad_scroll(true);
+    let controls =
+        slint::LogicalPosition::new(ui.get_zoom_plus_center_x(), ui.get_zoom_plus_center_y());
+    ui.window().dispatch_event(WindowEvent::PointerScrolled {
+        position: controls,
+        delta_x: 25.,
+        delta_y: 30.,
+    });
+    {
+        let e = state.borrow();
+        require(
+            e.view.x == before.x && e.view.y == before.y && e.view.scale == before.scale,
+            "zoom control scroll leaked to the canvas",
+        )?;
+    }
+    ui.set_touchpad_scroll(false);
+    window_pointer_click(
+        ui,
+        ui.get_reset_view_center_x(),
+        ui.get_reset_view_center_y(),
+    );
+    require(
+        !ui.get_can_reset_view()
+            && !state
+                .borrow()
+                .can_reset_view(ui.get_viewport_width(), ui.get_viewport_height()),
+        "reset icon did not restore the imported centered view and disappear",
+    )?;
+    save_window_snapshot(ui, &folder.join("view-reset.png"))?;
+    Ok(())
+}
+
 fn finish_alignment(
     ui: &AppWindow,
     folder: &Path,
@@ -406,8 +502,9 @@ fn finish_alignment(
             )?;
             std::fs::write(folder.join("ui-report.json"), serde_json::to_vec_pretty(&serde_json::json!({
                 "result":"passed", "platform":std::env::consts::OS,
+                "native_windows_touchpad_initialized":ui.get_native_touchpad_ready(),
                 "method":"real Slint window, scene-dispatched keyboard/pointer events, isolated data and clipboard; not physical IME or screen-reader certification",
-                "checks":["collapsed/expanded rows and header toggle", "collapse commits drafts", "model sync preserves caret", "Delete/Backspace edit text only", "Escape cancels pending text", "Ctrl/Command+Enter commits and closes", "invalid text blocks collapse and restores focus", "copy failure preserves the draft", "independent collapsed delete, safe default, cancel and undo", "1000 notes with full text retained", "1000x688 logical window", "keyboard discoverable cross-device help", "manual list scroll survives ordinary redraw"]
+                "checks":["collapsed/expanded rows and header toggle", "collapse commits drafts", "model sync preserves caret", "Delete/Backspace edit text only", "Escape cancels pending text", "Ctrl/Command+Enter commits and closes", "invalid text blocks collapse and restores focus", "copy failure preserves the draft", "independent collapsed delete, safe default, cancel and undo", "1000 notes with full text retained", "1000x688 logical window", "keyboard discoverable cross-device help", "manual list scroll survives ordinary redraw", "two-axis touchpad pan preserves scale and document", "mouse wheel zoom preserves pointer anchor", "conditional reset restores imported view", "zoom controls consume scrolling"]
             })).unwrap()).map_err(|e| e.to_string())?;
             Ok(())
         })();

@@ -2,8 +2,8 @@
 use super::*;
 use std::time::Instant;
 
-fn ready(loaded: bool, busy: bool, analysing: bool) -> bool {
-    loaded && !busy && !analysing
+fn ready(loaded: bool, busy: bool, analysing: bool, native_ready: bool) -> bool {
+    loaded && !busy && !analysing && native_ready
 }
 
 pub(super) fn start(
@@ -38,11 +38,12 @@ fn poll(
     let loaded = ui.get_loaded();
     let busy = ui.get_busy();
     let analysing = state.borrow().analysis_loading;
-    if ready(loaded, busy, analysing) {
+    let native_ready = !cfg!(windows) || ui.get_native_touchpad_ready();
+    if ready(loaded, busy, analysing, native_ready) {
         action(&ui);
     } else if Instant::now() >= deadline {
         let error = format!(
-            "Demo readiness timed out after 30 seconds: loaded={loaded}, busy={busy}, analysing={analysing}"
+            "Demo readiness timed out after 30 seconds: loaded={loaded}, busy={busy}, analysing={analysing}, native_input={native_ready}"
         );
         *failure.borrow_mut() = Some(error.clone());
         let _ = std::fs::create_dir_all(&folder);
@@ -67,9 +68,10 @@ mod tests {
             for busy in [false, true] {
                 for analysing in [false, true] {
                     assert_eq!(
-                        ready(loaded, busy, analysing),
+                        ready(loaded, busy, analysing, true),
                         loaded && !busy && !analysing
                     );
+                    assert!(!ready(loaded, busy, analysing, false));
                 }
             }
         }

@@ -1,11 +1,15 @@
 //! Platform integration kept outside document and rendering logic.
 #[cfg(target_os = "macos")]
 mod macos;
+#[cfg(windows)]
+mod windows;
 #[cfg(target_os = "macos")]
 pub use macos::{
     activate_editor, configure_editor_backend, install_quit_handler, install_reopen_handler,
     request_native_quit, start_activation_server, verify_menu_bar_template,
 };
+#[cfg(windows)]
+pub use windows::TouchpadInput;
 
 #[cfg(not(target_os = "macos"))]
 pub fn configure_editor_backend() -> Result<(), String> {

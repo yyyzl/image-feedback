@@ -56,6 +56,7 @@ component ActionButton inherits Rectangle {
     in property <bool> enabled: true;
     in property <bool> destructive: false;
     in property <bool> focus-ring: false;
+    in property <bool> blocks-scroll: false;
     in property <length> font-size: 12px;
     out property <bool> hovered: hit.has-hover;
     out property <bool> focused: keys.has-focus;
@@ -100,7 +101,10 @@ component ActionButton inherits Rectangle {
             vertical-alignment: center;
         }
     }
-    hit := TouchArea { enabled: root.enabled; clicked => { root.activate(); } }
+    hit := TouchArea {
+        enabled: root.enabled; clicked => { root.activate(); }
+        scroll-event(event) => { return root.blocks-scroll ? accept : reject; }
+    }
     keys := FocusScope {
         width: 0px; height: 0px; enabled: root.enabled;
         key-pressed(event) => {
@@ -254,7 +258,9 @@ export component AppWindow inherits Window {
     in property <bool> can-undo: false;
     in property <bool> can-redo: false;
     in property <int> tool: 0;
-    in property <string> zoom-label: "100%";
+    in property <bool> can-reset-view: false;
+    in property <bool> touchpad-scroll: false;
+    in property <bool> native-touchpad-ready: false;
     in property <int> note-count: 0;
     in property <[NoteRow]> notes;
     in property <int> active-note-token: 0;
@@ -289,6 +295,8 @@ export component AppWindow inherits Window {
     in property <bool> delivery-ready: false;
     out property <float> zoom-plus-center-x: (zoomPlus.absolute-position.x + zoomPlus.width / 2) / 1px;
     out property <float> zoom-plus-center-y: (zoomPlus.absolute-position.y + zoomPlus.height / 2) / 1px;
+    out property <float> reset-view-center-x: (zoomControls.absolute-position.x - 23px) / 1px;
+    out property <float> reset-view-center-y: (zoomControls.absolute-position.y + 19px) / 1px;
     out property <float> note-scroll-y: noteScroll.content-y / 1px;
     out property <float> notes-viewport-height: noteScroll.visible-height / 1px;
     out property <float> active-note-top: root.has-active-note ? root.active-note-state.top / 1px : -1;
@@ -410,7 +418,15 @@ export component AppWindow inherits Window {
     callback canvas-press(float, float, int);
     callback canvas-move(float, float);
     callback canvas-release(float, float);
-    callback canvas-wheel(float, float, float);
+    callback canvas-wheel(float, float, float, float, bool);
+    public function canvas-accepts-scroll(x: float, y: float) -> bool {
+        let local-x = x * 1px - canvasClip.absolute-position.x;
+        let local-y = y * 1px - canvasClip.absolute-position.y;
+        return root.loaded && !root.busy && !root.confirm-visible && !root.text-composing
+            && local-x >= 0px && local-y >= 0px && local-x < canvasClip.width && local-y < canvasClip.height
+            && !(local-x >= zoomControls.x - 42px && local-x <= zoomControls.x + zoomControls.width
+                && local-y >= zoomControls.y && local-y <= zoomControls.y + zoomControls.height);
+    }
     callback viewport-resized(float, float);
 
     changed viewport-width => {
@@ -441,12 +457,13 @@ export component AppWindow inherits Window {
             return reject;
         }
     helpMenu := PopupWindow {
-        x: root.width - 230px; y: root.native-chrome ? 62px : 42px; width: 216px; height: 188px;
+        x: root.width - 230px; y: root.native-chrome ? 62px : 42px; width: 216px; height: 232px;
         Rectangle { x: 0px; y: 0px; width: parent.width; height: parent.height; border-radius: 9px; border-width: 1px; border-color: #dfe3ed; background: #ffffff;
             ActionButton { x: 7px; y: 8px; width: 182px; height: 40px; label: "复制原图路径"; quiet: true; enabled: root.loaded && !root.busy && !root.text-composing; clicked => { helpMenu.close(); root.copy-original-path(); } }
             ActionButton { x: 7px; y: 52px; width: 202px; height: 40px; label: "复制 Base64 便携数据"; quiet: true; enabled: root.loaded && !root.busy && !root.text-composing; clicked => { helpMenu.close(); root.copy-portable-data(); } }
             ActionButton { x: 7px; y: 96px; width: 202px; height: 40px; label: "打开最近反馈包"; quiet: true; enabled: root.delivery-ready && !root.busy; clicked => { helpMenu.close(); root.open-feedback-folder(); } }
-            ActionButton { x: 7px; y: 140px; width: 202px; height: 40px; label: "关于图片反馈"; quiet: true; clicked => { helpMenu.close(); about.show(); } }
+            ActionButton { x: 7px; y: 140px; width: 202px; height: 40px; label: root.smart-enabled ? "智能预选：开" : "智能预选：关"; quiet: true; enabled: !root.busy && !root.text-composing; clicked => { helpMenu.close(); root.toggle-smart(); } }
+            ActionButton { x: 7px; y: 184px; width: 202px; height: 40px; label: "关于图片反馈"; quiet: true; clicked => { helpMenu.close(); about.show(); } }
         }
     }
     about := PopupWindow {
@@ -568,22 +585,13 @@ export component AppWindow inherits Window {
                 Text {
                     x: 110px;
                     y: 15px;
-                    width: parent.width - 262px;
+                    width: parent.width - 132px;
                     height: 18px;
                     visible: root.busy;
                     text: root.status-text;
                     color: #98a0ac;
                     font-size: 11px;
                     overflow: elide;
-                }
-                ActionButton {
-                    x: parent.width - 136px;
-                    y: 8px;
-                    width: 121px;
-                    height: 30px;
-                    label: root.smart-enabled ? "智能预选  开" : "智能预选  关";
-                    enabled: !root.busy && !root.text-composing;
-                    clicked => { root.toggle-smart(); }
                 }
                 Rectangle { y: parent.height - 1px; width: parent.width; height: 1px; background: #e6e9ef; }
             }
@@ -736,7 +744,7 @@ export component AppWindow inherits Window {
                             }
                         }
                         scroll-event(event) => {
-                            root.canvas-wheel(event.delta-y / 1px, self.mouse-x / 1px, self.mouse-y / 1px);
+                            root.canvas-wheel(event.delta-x / 1px, event.delta-y / 1px, self.mouse-x / 1px, self.mouse-y / 1px, root.touchpad-scroll);
                             return EventResult.accept;
                         }
                     }
@@ -831,10 +839,10 @@ export component AppWindow inherits Window {
                 }
 
                 // Controls and their hit region stop click/scroll penetration to the canvas.
-                Rectangle {
-                    x: parent.width - self.width - 16px;
+                zoomControls := Rectangle {
+                    x: min(parent.width - self.width - 16px, parent.width * 0.6 + 42px);
                     y: parent.height - self.height - 16px;
-                    width: 232px; height: 38px;
+                    width: 76px; height: 38px;
                     visible: root.loaded;
                     border-radius: 9px;
                     border-width: 1px; border-color: #dce2eb; background: #ffffff;
@@ -843,26 +851,23 @@ export component AppWindow inherits Window {
                         scroll-event(event) => { return accept; }
                     }
                     ActionButton {
-                        x: 4px; y: 4px; width: 30px; height: 30px; label: "−"; quiet: true;
+                        x: 4px; y: 4px; width: 32px; height: 30px; label: "缩小"; icon: @image-url("../assets/icons/minus.svg"); icon-only: true; quiet: true;
                         enabled: root.loaded && !root.busy && !root.text-composing;
                         clicked => { root.zoom-by(0.8); }
                     }
-                    Text {
-                        x: 38px; y: 4px; width: 60px; height: 30px;
-                        text: root.zoom-label; color: #667185; font-size: 11px;
-                        horizontal-alignment: center; vertical-alignment: center;
-                    }
                     zoomPlus := ActionButton {
-                        x: 102px; y: 4px; width: 30px; height: 30px; label: "＋"; quiet: true;
+                        x: 40px; y: 4px; width: 32px; height: 30px; label: "放大"; icon: @image-url("../assets/icons/new.svg"); icon-only: true; quiet: true;
                         enabled: root.loaded && !root.busy && !root.text-composing;
                         clicked => { root.zoom-by(1.25); }
                     }
-                    Rectangle { x: 140px; y: 11px; width: 1px; height: 16px; background: #e5e9ee; }
-                    ActionButton {
-                        x: 148px; y: 4px; width: 80px; height: 30px; label: "显示全图"; quiet: true;
-                        enabled: root.loaded && !root.busy && !root.text-composing;
-                        clicked => { root.fit-view(); }
-                    }
+                }
+                if root.loaded && root.can-reset-view : resetView := ActionButton {
+                    x: zoomControls.x - 42px; y: zoomControls.y;
+                    width: 38px; height: 38px; border-radius: 19px;
+                    label: "恢复初始视图"; shortcut: "F"; icon: @image-url("../assets/icons/reset-view.svg"); icon-only: true;
+                    blocks-scroll: true;
+                    enabled: !root.busy && !root.text-composing;
+                    clicked => { root.fit-view(); }
                 }
 
                 if root.busy : Rectangle {

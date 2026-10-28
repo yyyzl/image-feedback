@@ -35,6 +35,12 @@ struct View {
     height: f32,
     fit: bool,
 }
+fn continuous_scroll(delta: &slint::winit_030::winit::event::MouseScrollDelta) -> bool {
+    matches!(
+        delta,
+        slint::winit_030::winit::event::MouseScrollDelta::PixelDelta(_)
+    )
+}
 #[derive(Clone)]
 enum Gesture {
     Select {
@@ -329,20 +335,40 @@ impl Editor {
             p.x >= 0. && p.y >= 0. && p.x <= d.image.width as f32 && p.y <= d.image.height as f32
         })
     }
-    fn fit(&mut self, w: f32, h: f32) {
-        if let Some(doc) = self.doc() {
+    fn initial_view(&self, w: f32, h: f32) -> Option<View> {
+        self.doc().map(|doc| {
             let scale = ((w - 56.).max(20.) / doc.image.width as f32)
                 .min((h - 56.).max(20.) / doc.image.height as f32)
                 .min(2.);
-            self.view = View {
+            View {
                 scale,
                 x: (w - doc.image.width as f32 * scale) / 2.,
                 y: (h - doc.image.height as f32 * scale) / 2.,
                 width: w,
                 height: h,
                 fit: true,
-            };
+            }
+        })
+    }
+    fn fit(&mut self, w: f32, h: f32) {
+        if let Some(view) = self.initial_view(w, h) {
+            self.view = view;
         }
+    }
+    fn can_reset_view(&self, w: f32, h: f32) -> bool {
+        self.initial_view(w, h).is_some_and(|initial| {
+            (self.view.scale - initial.scale).abs() > 0.0001
+                || (self.view.x - initial.x).abs() > 0.5
+                || (self.view.y - initial.y).abs() > 0.5
+        })
+    }
+    fn pan_view(&mut self, dx: f32, dy: f32) {
+        if !dx.is_finite() || !dy.is_finite() {
+            return;
+        }
+        self.view.x += dx;
+        self.view.y += dy;
+        self.view.fit = false;
     }
     fn hit(&self, p: Point) -> Option<u64> {
         let doc = self.doc()?;
@@ -805,8 +831,13 @@ fn sync(ui: &AppWindow, e: &mut Editor) {
     if e.view.fit && ((width - e.view.width).abs() > 0.5 || (height - e.view.height).abs() > 0.5) {
         e.fit(width, height);
     }
+    let can_reset = e.can_reset_view(width, height);
+    if !can_reset {
+        e.view.fit = true;
+    }
     let Some(doc) = e.doc() else {
         ui.set_loaded(false);
+        ui.set_can_reset_view(false);
         ui.set_source_image(slint::Image::default());
         ui.set_image_name("尚未导入图片".into());
         ui.set_dirty(false);
@@ -818,7 +849,6 @@ fn sync(ui: &AppWindow, e: &mut Editor) {
         ui.set_active_note_token(0);
         ui.set_smart_status("智能预选 · 载入图片后准备".into());
         ui.set_tool(e.tool);
-        ui.set_zoom_label("100%".into());
         return;
     };
     ui.set_loaded(true);
@@ -827,7 +857,7 @@ fn sync(ui: &AppWindow, e: &mut Editor) {
     ui.set_can_undo(e.history.as_ref().is_some_and(History::can_undo));
     ui.set_can_redo(e.history.as_ref().is_some_and(History::can_redo));
     ui.set_tool(e.tool);
-    ui.set_zoom_label(format!("{:.0}%", e.view.scale * 100.).into());
+    ui.set_can_reset_view(can_reset);
     ui.set_note_count(doc.annotations.len() as i32);
     ui.set_canvas_x(e.view.x);
     ui.set_canvas_y(e.view.y);
@@ -1674,7 +1704,7 @@ fn smoke_interactions(
         return Err("UI undo/redo failed to preserve document".into());
     }
     let anchor = state.borrow().point(350., 300.);
-    ui.invoke_canvas_wheel(55., 350., 300.);
+    ui.invoke_canvas_wheel(0., 55., 350., 300., false);
     let after = state.borrow().point(350., 300.);
     if (anchor.x - after.x).abs() > 0.01 || (anchor.y - after.y).abs() > 0.01 {
         return Err("zoom did not preserve pointer anchor".into());
@@ -1792,6 +1822,11 @@ fn run_editor(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
                 WindowEvent::ModifiersChanged(mods) => {
                     if let Some(ui) = weak.upgrade() {
                         ui.set_shift_held(mods.state().shift_key());
+                    }
+                }
+                WindowEvent::MouseWheel { delta, .. } => {
+                    if let Some(ui) = weak.upgrade() {
+                        ui.set_touchpad_scroll(continuous_scroll(delta));
                     }
                 }
                 WindowEvent::Focused(false) => {
@@ -2425,8 +2460,35 @@ fn run_editor(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
     {
         let weak = ui.as_weak();
         let state = editor.clone();
-        ui.on_canvas_wheel(move |dy, x, y| {
+        ui.on_canvas_wheel(move |dx, dy, x, y, touchpad| {
             if let Some(ui) = weak.upgrade() {
+                if dx == 0. && dy == 0. {
+                    return;
+                }
+                if touchpad {
+                    let mut e = state.borrow_mut();
+                    if e.worker.is_some()
+                        || e.doc().is_none()
+                        || e.confirmation.is_some()
+                        || e.message.is_some()
+                        || ui.get_text_composing()
+                    {
+                        return;
+                    }
+                    if let Err(err) = e.flush() {
+                        show_message(&ui, &mut e, "无法完成操作", err);
+                        return;
+                    }
+                    e.gesture = None;
+                    ui.set_preview_visible(false);
+                    clear_hover(&ui, &mut e);
+                    e.pan_view(dx, dy);
+                    sync(&ui, &mut e);
+                    return;
+                }
+                if dy == 0. {
+                    return;
+                }
                 zoom(
                     &ui,
                     &mut state.borrow_mut(),
@@ -2662,7 +2724,37 @@ fn run_editor(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
         });
     }
     set_status(&ui, "本地处理 · 不联网 · 原图保持不变");
+    let smoke_result = Rc::new(RefCell::new(None::<String>));
     ui.show()?;
+    #[cfg(windows)]
+    let touchpad_input = Rc::new(RefCell::new(None));
+    #[cfg(windows)]
+    {
+        let input = touchpad_input.clone();
+        let weak = ui.as_weak();
+        let failure = smoke_result.clone();
+        // winit 在事件循环恢复后才创建真实窗口，不能在 show 返回时立即取得 HWND。
+        slint::spawn_local(async move {
+            if let Some(ui) = weak.upgrade() {
+                let result = ui
+                    .window()
+                    .winit_window()
+                    .await
+                    .map_err(|e| e.to_string())
+                    .and_then(|window| platform::TouchpadInput::install(&ui, &window));
+                match result {
+                    Ok(bridge) => {
+                        *input.borrow_mut() = Some(bridge);
+                        ui.set_native_touchpad_ready(true);
+                    }
+                    Err(error) => {
+                        *failure.borrow_mut() = Some(error);
+                        let _ = ui.hide();
+                    }
+                }
+            }
+        })?;
+    }
     // Startup loading happens once, after the real viewport has been laid out.
     let smoke = args.iter().any(|a| {
         a == "--smoke-test" || a == "--dialog-smoke" || a == "--delivery-smoke" || a == "--ui-smoke"
@@ -2690,7 +2782,6 @@ fn run_editor(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
             }
         });
     }
-    let smoke_result = Rc::new(RefCell::new(None::<String>));
     if let Some(index) = args.iter().position(|arg| arg == "--smoke-test") {
         let folder = args
             .get(index + 1)
