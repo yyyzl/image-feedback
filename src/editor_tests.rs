@@ -165,6 +165,12 @@ fn clean_action_does_not_prompt_or_modify_document() {
     );
     assert!(e.confirmation.is_none());
     assert_eq!(e.doc(), before.as_ref());
+    assert_eq!(
+        e.request_action(PendingAction::New),
+        Some(PendingAction::New)
+    );
+    assert!(e.confirmation.is_none());
+    assert_eq!(e.doc(), before.as_ref());
 }
 #[test]
 fn cancel_confirmation_preserves_uncommitted_draft() {
@@ -178,6 +184,88 @@ fn cancel_confirmation_preserves_uncommitted_draft() {
     assert!(e.has_feedback());
     assert_eq!(e.pending.as_ref().unwrap().1, "尚未提交的文字");
 }
+#[test]
+fn cancelling_new_preserves_feedback_and_invalid_draft() {
+    let mut e = editor();
+    let before = e.doc().unwrap().clone();
+    e.pending = Some((1, "字".repeat(20_001)));
+    assert!(e.request_action(PendingAction::New).is_none());
+    assert_eq!(e.confirmation.as_ref().unwrap().action, PendingAction::New);
+    e.cancel_confirmation();
+    assert_eq!(e.doc(), Some(&before));
+    assert_eq!(e.pending.as_ref().unwrap().1.chars().count(), 20_001);
+}
+
+#[test]
+fn new_workspace_clears_editing_state_but_preserves_files_and_preferences() {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    let directory = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("target/new-workspace-tests")
+        .join(format!(
+            "{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+    std::fs::create_dir_all(&directory).unwrap();
+    let original = directory.join("original.png");
+    let reference = directory.join("reference.png");
+    let bytes = include_bytes!("../assets/demo.png");
+    std::fs::write(&original, bytes).unwrap();
+    std::fs::write(&reference, bytes).unwrap();
+    let asset = Arc::new(Asset::open(&original).unwrap());
+    let mut e = editor();
+    e.asset = Some(asset.clone());
+    e.selected = Some(1);
+    e.pending = Some((1, "待输入的批注".into()));
+    e.view.scale = 2.;
+    e.view.x = 42.;
+    e.view.fit = false;
+    e.tool = 2;
+    e.smart_enabled = false;
+    e.clipboard_written = Some("此前复制的反馈".into());
+    e.delivery = Some(DeliveryCache {
+        snapshot: e.doc().unwrap().clone(),
+        prepared: PreparedFeedback {
+            folder: directory.clone(),
+            original: original.clone(),
+            reference: reference.clone(),
+        },
+        source: Some(original.clone()),
+    });
+    e.analysis = Some(AnalysisService::new());
+    e.analysis_generation = e.analysis.as_ref().unwrap().submit(asset);
+    e.analysis_loading = true;
+
+    e.new_workspace();
+
+    assert!(e.doc().is_none() && e.asset.is_none() && e.pending.is_none());
+    assert!(e.selected.is_none() && e.gesture.is_none() && e.delivery.is_none());
+    assert_eq!(
+        (e.view.scale, e.view.x, e.view.fit, e.tool),
+        (1., 0., true, 0)
+    );
+    assert!(!e.analysis_loading && e.candidates.is_empty() && e.eligible.is_empty());
+    assert!(!e.smart_enabled);
+    assert_eq!(e.clipboard_written.as_deref(), Some("此前复制的反馈"));
+    assert_eq!(std::fs::read(&original).unwrap(), bytes);
+    assert_eq!(std::fs::read(&reference).unwrap(), bytes);
+    std::fs::remove_dir_all(directory).unwrap();
+}
+
+#[test]
+fn new_is_blocked_while_a_background_task_is_active() {
+    let mut e = editor();
+    let before = e.doc().unwrap().clone();
+    let (_sender, receiver) = mpsc::channel();
+    e.worker = Some(receiver);
+    assert!(e.request_action(PendingAction::New).is_none());
+    assert!(e.confirmation.is_none());
+    assert_eq!(e.doc(), Some(&before));
+}
+
 #[test]
 fn a_second_request_cannot_replace_the_confirmed_intent() {
     let mut e = editor();

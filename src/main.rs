@@ -84,6 +84,7 @@ enum Work {
 #[derive(Clone, Debug, PartialEq)]
 enum PendingAction {
     Close,
+    New,
     Load { path: PathBuf },
     Demo { annotated: bool },
     Paste,
@@ -210,6 +211,33 @@ impl Editor {
         self.hover_point = None;
         self.delivery = None;
         Ok(())
+    }
+    fn new_workspace(&mut self) {
+        if let Some(analysis) = self.analysis.as_ref() {
+            analysis.cancel();
+        }
+        self.history = None;
+        self.asset = None;
+        self.selected = None;
+        self.pending = None;
+        self.gesture = None;
+        self.view = View {
+            scale: 1.,
+            fit: true,
+            ..Default::default()
+        };
+        self.tool = 0;
+        self.preview_scale = 1.;
+        self.preview_scale_y = 1.;
+        self.analysis_generation = 0;
+        self.analysis_loading = false;
+        self.candidates.clear();
+        self.eligible.clear();
+        self.ownership.clear();
+        self.hover = None;
+        self.hover_point = None;
+        self.delivery = None;
+        self.revealed_selection = None;
     }
     fn doc(&self) -> Option<&Document> {
         self.history.as_ref().map(History::document)
@@ -699,6 +727,7 @@ fn sync_confirmation(ui: &AppWindow, e: &Editor) {
         ui.set_confirm_visible(true);
     } else if let Some(c) = e.confirmation.as_ref() {
         let closing = matches!(c.action, PendingAction::Close);
+        let starting_new = matches!(c.action, PendingAction::New);
         let exiting_app = closing && e.resident_quit_reply.is_some();
         ui.set_confirm_show_cancel(true);
         ui.set_confirm_destructive(true);
@@ -710,6 +739,8 @@ fn sync_confirmation(ui: &AppWindow, e: &Editor) {
                 "退出图片反馈？"
             } else if closing {
                 "关闭当前图片？"
+            } else if starting_new {
+                "新建空白工作区？"
             } else {
                 "替换当前图片？"
             }
@@ -720,6 +751,8 @@ fn sync_confirmation(ui: &AppWindow, e: &Editor) {
                 "退出后将无法继续编辑当前批注，原图不会改变。"
             } else if closing {
                 "关闭后将无法继续编辑当前批注，原图不会改变。"
+            } else if starting_new {
+                "新建后将无法继续编辑当前批注，原图不会改变。"
             } else {
                 "换图后将无法继续编辑当前批注，原图不会改变。"
             }
@@ -737,6 +770,8 @@ fn sync_confirmation(ui: &AppWindow, e: &Editor) {
                 "退出并丢弃"
             } else if closing {
                 "关闭并丢弃"
+            } else if starting_new {
+                "新建并丢弃"
             } else {
                 "替换并丢弃"
             }
@@ -969,6 +1004,19 @@ fn perform_action(ui: &AppWindow, e: &mut Editor, timer: &Rc<slint::Timer>, acti
     match action {
         PendingAction::Close => {
             let _ = ui.hide();
+        }
+        PendingAction::New => {
+            e.new_workspace();
+            timer.stop();
+            ui.set_preview_visible(false);
+            ui.set_hover_visible(false);
+            ui.set_toast_visible(false);
+            ui.set_copy_complete(false);
+            ui.set_space_held(false);
+            ui.set_shift_held(false);
+            sync(ui, e);
+            ui.invoke_focus_canvas();
+            set_status(ui, "已新建 · 导入或粘贴图片开始");
         }
         PendingAction::Load { path } => load_path_unchecked(ui, e, timer, path),
         PendingAction::Demo { annotated } => load_demo_unchecked(ui, e, timer, annotated),
@@ -1954,6 +2002,16 @@ fn run_editor(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
             ui.set_preview_visible(false);
             ui.set_toast_visible(false);
             sync_confirmation(&ui, &e);
+        });
+    }
+    {
+        let weak = ui.as_weak();
+        let state = editor.clone();
+        let t = timer.clone();
+        ui.on_new_workspace(move || {
+            if let Some(ui) = weak.upgrade() {
+                begin_action(&ui, &mut state.borrow_mut(), &t, PendingAction::New);
+            }
         });
     }
     {

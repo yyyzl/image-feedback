@@ -289,6 +289,8 @@ export component AppWindow inherits Window {
     out property <float> canvas-window-y: canvasTouch.absolute-position.y / 1px;
     out property <float> copy-button-center-x: (copyFeedback.absolute-position.x + copyFeedback.width / 2) / 1px;
     out property <float> copy-button-center-y: (copyFeedback.absolute-position.y + copyFeedback.height / 2) / 1px;
+    out property <float> new-button-center-x: (newWorkspace.absolute-position.x + newWorkspace.width / 2) / 1px;
+    out property <float> new-button-center-y: (newWorkspace.absolute-position.y + newWorkspace.height / 2) / 1px;
     out property <float> close-button-center-x: (closeWindow.absolute-position.x + closeWindow.width / 2) / 1px;
     out property <float> close-button-center-y: (closeWindow.absolute-position.y + closeWindow.height / 2) / 1px;
     in property <bool> delivery-ready: false;
@@ -391,6 +393,7 @@ export component AppWindow inherits Window {
     out property <float> clear-feedback-center-x: (clearFeedback.absolute-position.x + clearFeedback.width / 2) / 1px;
     out property <float> clear-feedback-center-y: (clearFeedback.absolute-position.y + clearFeedback.height / 2) / 1px;
     public function focus-canvas() { canvasKeys.focus(); }
+    callback new-workspace();
     callback import-image();
     callback paste-image();
     callback copy-feedback();
@@ -442,6 +445,7 @@ export component AppWindow inherits Window {
                 }
                 if !event.modifiers.shift {
                     if event.text.to-lowercase() == "y" { root.redo(); return accept; }
+                    if event.text.to-lowercase() == "n" { root.new-workspace(); return accept; }
                     if event.text.to-lowercase() == "o" { root.import-image(); return accept; }
                 }
             }
@@ -493,6 +497,7 @@ export component AppWindow inherits Window {
             x: 24px; y: 14px; width: parent.width - 48px; height: 36px; spacing: 12px;
             fileButtons := HorizontalLayout {
                 spacing: 8px; horizontal-stretch: 0;
+                newWorkspace := ActionButton { min-width: 88px; label: "新建"; icon: @image-url("../assets/icons/new.svg"); font-size: 13px; shortcut: root.native-chrome ? "⌘N" : "Ctrl+N"; enabled: !root.busy && !root.text-composing; clicked => { root.new-workspace(); } }
                 ActionButton { min-width: 108px; label: "导入图片"; icon: @image-url("../assets/icons/image.svg"); font-size: 13px; shortcut: root.native-chrome ? "⌘O" : "Ctrl+O"; enabled: !root.busy && !root.text-composing; clicked => { root.import-image(); } }
             }
             Rectangle { width: 1px; height: 24px; y: 6px; background: #e9ecf1; }

@@ -630,6 +630,42 @@ fn start_ready(
             state.borrow().doc() == Some(&original),
             "redo stopped working after the focused editor was removed",
         )?;
+        shortcut(ui, "n", false);
+        require(
+            ui.get_confirm_visible()
+                && ui.get_confirm_title() == "新建空白工作区？"
+                && ui.get_confirm_choice() == 0,
+            "new shortcut did not ask before discarding feedback",
+        )?;
+        cancel(ui);
+        require(
+            state.borrow().doc() == Some(&original),
+            "cancelling the new shortcut changed feedback",
+        )?;
+        state.borrow_mut().pending = Some((id, "字".repeat(20_001)));
+        window_pointer_click(
+            ui,
+            ui.get_new_button_center_x(),
+            ui.get_new_button_center_y(),
+        );
+        require(
+            ui.get_confirm_visible()
+                && ui.get_confirm_title() == "新建空白工作区？"
+                && ui.get_confirm_choice() == 0,
+            "new button did not safely confirm before discarding feedback",
+        )?;
+        save_window_snapshot(ui, &folder.join("new-confirmation.png"))?;
+        cancel(ui);
+        require(
+            state.borrow().doc() == Some(&original)
+                && state
+                    .borrow()
+                    .pending
+                    .as_ref()
+                    .is_some_and(|(_, text)| text.chars().count() == 20_001),
+            "cancelling new discarded feedback or an invalid draft",
+        )?;
+        state.borrow_mut().pending = None;
         ui.invoke_load_example();
         require(
             ui.get_confirm_visible(),
@@ -858,6 +894,7 @@ fn start_ready(
             failure,
             expected,
             Instant::now() + Duration::from_secs(10),
+            false,
         ),
         Err(error) => fail(ui, &folder, &failure, error),
     }
@@ -871,6 +908,7 @@ fn poll(
     failure: Rc<RefCell<Option<String>>>,
     expected: Document,
     deadline: Instant,
+    after_new: bool,
 ) {
     slint::Timer::single_shot(Duration::from_millis(50), move || {
         let Some(ui) = weak.upgrade() else {
@@ -880,11 +918,13 @@ fn poll(
             if Instant::now() > deadline {
                 fail(&ui, &folder, &failure, "image replacement timed out".into());
             } else {
-                poll(weak, state, timer, folder, failure, expected, deadline);
+                poll(
+                    weak, state, timer, folder, failure, expected, deadline, after_new,
+                );
             }
             return;
         }
-        let result = (|| -> Result<(), String> {
+        let result = (|| -> Result<bool, String> {
             require(
                 !ui.get_confirm_visible(),
                 "replacement confirmation did not close",
@@ -896,6 +936,45 @@ fn poll(
                     .is_some_and(|doc| doc.annotations.is_empty() && doc != &expected),
                 "confirmed replacement did not load a clean image",
             )?;
+            if !after_new {
+                ui.invoke_add_global();
+                window_pointer_click(
+                    &ui,
+                    ui.get_new_button_center_x(),
+                    ui.get_new_button_center_y(),
+                );
+                require(
+                    ui.get_confirm_visible() && ui.get_confirm_choice() == 0,
+                    "new did not confirm before clearing the current feedback",
+                )?;
+                primary(&ui);
+                require(
+                    !ui.get_loaded()
+                        && ui.get_note_count() == 0
+                        && !ui.get_can_undo()
+                        && !ui.get_can_redo()
+                        && state.borrow().doc().is_none()
+                        && state.borrow().asset.is_none()
+                        && !state.borrow().analysis_loading,
+                    "confirmed new did not return to a clean empty workspace",
+                )?;
+                save_window_snapshot(&ui, &folder.join("new-empty.png"))?;
+                window_pointer_click(
+                    &ui,
+                    ui.get_new_button_center_x(),
+                    ui.get_new_button_center_y(),
+                );
+                require(
+                    !ui.get_loaded() && !ui.get_confirm_visible(),
+                    "new on an empty workspace unexpectedly prompted",
+                )?;
+                ui.invoke_load_example();
+                require(
+                    state.borrow().worker.is_some(),
+                    "could not start a new image after resetting the workspace",
+                )?;
+                return Ok(false);
+            }
             ui.invoke_add_global();
             close_click(&ui)?;
             require(
@@ -908,6 +987,8 @@ fn poll(
                 "method":"real Slint window with scene-dispatched pointer and key events; not OS input automation",
                 "checks":[
                     "close and image replacement require an explicit discard",
+                    "new button and shortcut protect feedback and invalid drafts",
+                    "confirmed new clears the workspace and permits a new image",
                     "resident quit cancellation and busy modal preserve feedback",
                     "destructive confirmation defaults to cancel",
                     "modal pointer and keyboard blocking",
@@ -938,10 +1019,21 @@ fn poll(
                 }
             });
             primary(&ui);
-            Ok(())
+            Ok(true)
         })();
-        if let Err(error) = result {
-            fail(&ui, &folder, &failure, error);
+        match result {
+            Ok(false) => poll(
+                weak,
+                state,
+                timer,
+                folder,
+                failure,
+                expected,
+                Instant::now() + Duration::from_secs(10),
+                true,
+            ),
+            Ok(true) => {}
+            Err(error) => fail(&ui, &folder, &failure, error),
         }
     });
 }
