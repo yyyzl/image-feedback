@@ -41,7 +41,7 @@ fn cancel(ui: &AppWindow) {
     window_pointer_click(ui, ui.get_confirm_cancel_x(), ui.get_confirm_cancel_y());
 }
 fn primary(ui: &AppWindow) {
-    window_pointer_click(ui, ui.get_confirm_save_x(), ui.get_confirm_save_y());
+    window_pointer_click(ui, ui.get_confirm_primary_x(), ui.get_confirm_primary_y());
 }
 fn require(condition: bool, error: &str) -> Result<(), String> {
     if condition { Ok(()) } else { Err(error.into()) }
@@ -66,7 +66,19 @@ pub(super) fn start_alignment(
                 asset.name.clone(),
             )
         };
-        ui.invoke_new_project();
+        {
+            // Capture the empty workspace without exposing a separate project action.
+            let mut e = state.borrow_mut();
+            if let Some(analysis) = e.analysis.take() {
+                analysis.cancel();
+            }
+            e.history = None;
+            e.asset = None;
+            e.selected = None;
+            e.pending = None;
+            e.analysis_loading = false;
+            sync(ui, &mut e);
+        }
         save_window_snapshot(ui, &folder.join("empty.png"))?;
         let region = doc.add_region(Rect {
             x: 48.,
@@ -92,7 +104,7 @@ pub(super) fn start_alignment(
         doc.set_text(global, "保持整体简洁，突出主要操作".into())?;
         let asset = Asset::from_bytes(bytes, name)?;
         let thumb = preview(&asset);
-        install(ui, &mut state.borrow_mut(), doc, asset, None, thumb);
+        install(ui, &mut state.borrow_mut(), doc, asset, thumb);
         timer.restart();
         ui.invoke_select_note(1);
         Ok(())
@@ -307,8 +319,7 @@ fn alignment_poll(
                         }
                     }
                     let mut e = state.borrow_mut();
-                    e.history = Some(History::new(doc.clone()));
-                    e.saved = Some(doc);
+                    e.history = Some(History::new(doc));
                     e.selected = Some(1000);
                     e.revealed_selection = None;
                     sync(&ui, &mut e);
@@ -338,7 +349,13 @@ fn alignment_poll(
                     )?;
                     require(
                         ui.get_toolbar_fits(),
-                        "minimum window overlaps file/history/save/export controls",
+                        "minimum window overlaps import/history controls",
+                    )?;
+                    require(
+                        (ui.get_zoom_right_gap() - 48.).abs() < 1.
+                            && (ui.get_toast_right() - ui.get_copy_button_right()).abs() < 1.
+                            && ui.get_toast_bottom() < ui.get_copy_button_top(),
+                        "minimum window misplaced the canvas controls or copy toast",
                     )?;
                     require(
                         ui.get_active_note_visible() && ui.get_viewport_width() >= 500.,
@@ -398,6 +415,10 @@ fn canvas_input_checks(
     let original = state.borrow().doc().unwrap().clone();
     let initial = state.borrow().view;
     require(
+        (ui.get_zoom_right_gap() - 48.).abs() < 1.,
+        "zoom controls are not anchored near the canvas right edge",
+    )?;
+    require(
         !ui.get_can_reset_view(),
         "initial view showed a reset action",
     )?;
@@ -426,7 +447,7 @@ fn canvas_input_checks(
             "touchpad scroll did not pan both axes at unchanged scale",
         )?;
         require(
-            e.doc() == Some(&original) && !e.dirty(),
+            e.doc() == Some(&original),
             "view gesture changed document data",
         )?;
     }
@@ -609,10 +630,10 @@ fn start_ready(
             state.borrow().doc() == Some(&original),
             "redo stopped working after the focused editor was removed",
         )?;
-        shortcut(ui, "n", false);
+        ui.invoke_load_example();
         require(
             ui.get_confirm_visible(),
-            "new-project shortcut did not protect unsaved changes",
+            "image replacement did not protect current feedback",
         )?;
         shortcut(ui, "z", false);
         require(
@@ -622,18 +643,21 @@ fn start_ready(
         cancel(ui);
         require(
             state.borrow().doc() == Some(&original),
-            "cancelling new project changed the document",
+            "cancelling replacement changed the document",
         )?;
+
         close_click(ui)?;
         require(
-            ui.get_confirm_visible(),
-            "custom close did not show the self-drawn save confirmation",
+            ui.get_confirm_visible()
+                && ui.get_confirm_show_cancel()
+                && ui.get_confirm_destructive(),
+            "close did not show a safe two-choice discard confirmation",
         )?;
         require(
-            ui.get_confirm_show_cancel() && ui.get_confirm_show_discard(),
-            "save confirmation did not have all three choices",
+            ui.get_confirm_choice() == 0,
+            "destructive confirmation did not default to cancel",
         )?;
-        save_window_snapshot(ui, &folder.join("save-confirmation.png"))?;
+        save_window_snapshot(ui, &folder.join("close-confirmation.png"))?;
         window_pointer_click(
             ui,
             ui.get_canvas_window_x() + 150.,
@@ -650,43 +674,35 @@ fn start_ready(
         )?;
         key(ui, slint::platform::Key::Tab.into());
         require(
-            ui.get_confirm_choice() == 0,
+            ui.get_confirm_choice() == 2,
             "Tab did not stay in the modal navigation",
         )?;
         key(ui, slint::platform::Key::Escape.into());
         require(
-            !ui.get_confirm_visible() && state.borrow().dirty(),
-            "Escape did not cancel without discarding modifications",
-        )?;
-        close_click(ui)?;
-        cancel(ui);
-        require(
-            !ui.get_confirm_visible() && state.borrow().doc() == Some(&original),
-            "cancel changed the document",
+            !ui.get_confirm_visible() && state.borrow().has_feedback(),
+            "Escape discarded modifications",
         )?;
 
         state.borrow_mut().pending = Some((id, "字".repeat(20_001)));
-        close_click(ui)?;
-        primary(ui);
+        ui.invoke_load_example();
         require(
-            ui.get_confirm_visible()
-                && !ui.get_confirm_saving()
-                && !ui.get_confirm_error().is_empty(),
-            "invalid text did not stay in the save dialog",
+            ui.get_confirm_visible(),
+            "invalid draft did not protect image replacement",
         )?;
-        require(
-            state.borrow().pending.is_some(),
-            "invalid draft disappeared",
-        )?;
-        save_window_snapshot(ui, &folder.join("validation-error.png"))?;
         cancel(ui);
+        require(
+            state
+                .borrow()
+                .pending
+                .as_ref()
+                .is_some_and(|(_, text)| text.chars().count() == 20_001),
+            "cancelling replacement discarded an invalid draft",
+        )?;
         state.borrow_mut().pending = None;
 
         ui.invoke_remove_note(token);
         require(
-            ui.get_confirm_visible()
-                && ui.get_confirm_destructive()
-                && !ui.get_confirm_show_discard(),
+            ui.get_confirm_visible() && ui.get_confirm_destructive(),
             "delete did not use the shared destructive dialog",
         )?;
         save_window_snapshot(ui, &folder.join("delete-confirmation.png"))?;
@@ -763,9 +779,7 @@ fn start_ready(
             "这是隔离回归中的错误提示。当前编辑数据仍保留。",
         );
         require(
-            ui.get_confirm_visible()
-                && !ui.get_confirm_show_cancel()
-                && !ui.get_confirm_show_discard(),
+            ui.get_confirm_visible() && !ui.get_confirm_show_cancel(),
             "error notice did not use a single-action self-drawn dialog",
         )?;
         save_window_snapshot(ui, &folder.join("error-notice.png"))?;
@@ -775,25 +789,27 @@ fn start_ready(
             "error acknowledgement did not dismiss",
         )?;
 
-        let bad = folder.join("directory-not-file.ifp");
-        std::fs::create_dir_all(&bad).map_err(|e| e.to_string())?;
-        state.borrow_mut().project = Some(bad);
-        close_click(ui)?;
-        primary(ui);
+        ui.invoke_load_example();
         require(
-            ui.get_confirm_saving() && state.borrow().worker.is_some(),
-            "save did not enter the asynchronous saving state",
+            ui.get_confirm_visible(),
+            "image replacement did not ask before discarding",
         )?;
         cancel(ui);
         require(
-            state
-                .borrow()
-                .confirmation
-                .as_ref()
-                .is_some_and(|c| c.saving),
-            "saving could be cancelled midway",
+            state.borrow().doc() == Some(&original),
+            "replacement cancellation lost feedback",
         )?;
-        save_window_snapshot(ui, &folder.join("saving.png"))?;
+        ui.invoke_load_example();
+        require(
+            ui.get_confirm_visible(),
+            "repeated replacement did not prompt",
+        )?;
+        save_window_snapshot(ui, &folder.join("replace-confirmation.png"))?;
+        primary(ui);
+        require(
+            state.borrow().worker.is_some(),
+            "confirmed replacement did not start loading",
+        )?;
         Ok(original)
     })();
     match result {
@@ -804,12 +820,12 @@ fn start_ready(
             folder,
             failure,
             expected,
-            0,
             Instant::now() + Duration::from_secs(10),
         ),
         Err(error) => fail(ui, &folder, &failure, error),
     }
 }
+
 fn poll(
     weak: slint::Weak<AppWindow>,
     state: Rc<RefCell<Editor>>,
@@ -817,7 +833,6 @@ fn poll(
     folder: PathBuf,
     failure: Rc<RefCell<Option<String>>>,
     expected: Document,
-    stage: u8,
     deadline: Instant,
 ) {
     slint::Timer::single_shot(Duration::from_millis(50), move || {
@@ -826,183 +841,67 @@ fn poll(
         };
         if state.borrow().worker.is_some() {
             if Instant::now() > deadline {
-                fail(
-                    &ui,
-                    &folder,
-                    &failure,
-                    "asynchronous dialog operation timed out".into(),
-                );
+                fail(&ui, &folder, &failure, "image replacement timed out".into());
             } else {
-                poll(
-                    weak, state, timer, folder, failure, expected, stage, deadline,
-                );
+                poll(weak, state, timer, folder, failure, expected, deadline);
             }
             return;
         }
         let result = (|| -> Result<(), String> {
-            if stage == 0 {
-                require(
-                    ui.get_confirm_visible()
-                        && !ui.get_confirm_saving()
-                        && !ui.get_confirm_error().is_empty(),
-                    "filesystem save failure dismissed the confirmation",
-                )?;
-                require(
-                    state.borrow().dirty() && state.borrow().doc() == Some(&expected),
-                    "failed save changed or discarded modifications",
-                )?;
-                save_window_snapshot(&ui, &folder.join("save-error.png"))?;
-                cancel(&ui);
-                state.borrow_mut().project = Some(folder.join("confirmed-save.ifp"));
-                ui.invoke_load_example();
-                require(
-                    ui.get_confirm_visible()
-                        && ui.get_confirm_save_label().as_str() == "保存并继续",
-                    "replacing the image did not use save-and-continue",
-                )?;
-                save_window_snapshot(&ui, &folder.join("save-and-continue.png"))?;
-                primary(&ui);
-                require(
-                    ui.get_confirm_saving(),
-                    "confirmed save-and-continue did not start saving",
-                )?;
-                poll(
-                    ui.as_weak(),
-                    state.clone(),
-                    timer.clone(),
-                    folder.clone(),
-                    failure.clone(),
-                    expected.clone(),
-                    1,
-                    Instant::now() + Duration::from_secs(10),
-                );
-            } else if stage == 1 {
-                require(
-                    !ui.get_confirm_visible() && state.borrow().confirmation.is_none(),
-                    "successful save did not finish the confirmation",
-                )?;
-                require(
-                    state.borrow().doc().unwrap().annotations.is_empty(),
-                    "queued image replacement did not execute after saving",
-                )?;
-                let (saved, _) = storage::open_project(&folder.join("confirmed-save.ifp"))?;
-                require(
-                    saved == expected,
-                    "save-and-continue did not preserve the previous project",
-                )?;
-                shortcut(&ui, "n", false);
-                require(
-                    !ui.get_loaded() && state.borrow().doc().is_none(),
-                    "clean new project did not return to the empty workspace",
-                )?;
-                require(
-                    !ui.get_can_undo()
-                        && !ui.get_can_redo()
-                        && ui.get_notes().row_count() == 0
-                        && ui.get_marks().row_count() == 0
-                        && !ui.get_dirty(),
-                    "new project retained old history or annotations",
-                )?;
-                save_window_snapshot(&ui, &folder.join("new-project.png"))?;
-                let (_, asset) = storage::open_project(&folder.join("confirmed-save.ifp"))?;
-                let thumb = preview(&asset);
-                install(
-                    &ui,
-                    &mut state.borrow_mut(),
-                    saved,
-                    asset,
-                    Some(folder.join("confirmed-save.ifp")),
-                    thumb,
-                );
-                ui.invoke_add_global();
-                ui.invoke_new_project();
-                require(
-                    ui.get_confirm_visible(),
-                    "dirty new project did not show its save guard",
-                )?;
-                primary(&ui);
-                poll(
-                    ui.as_weak(),
-                    state.clone(),
-                    timer.clone(),
-                    folder.clone(),
-                    failure.clone(),
-                    expected.clone(),
-                    2,
-                    Instant::now() + Duration::from_secs(10),
-                );
-                return Ok(());
-            }
+            require(
+                !ui.get_confirm_visible(),
+                "replacement confirmation did not close",
+            )?;
+            require(
+                state
+                    .borrow()
+                    .doc()
+                    .is_some_and(|doc| doc.annotations.is_empty() && doc != &expected),
+                "confirmed replacement did not load a clean image",
+            )?;
+            ui.invoke_add_global();
+            close_click(&ui)?;
+            require(
+                ui.get_confirm_visible(),
+                "closing with feedback did not prompt",
+            )?;
+            save_window_snapshot(&ui, &folder.join("discard-close.png"))?;
+            let report = serde_json::json!({
+                "result":"passed",
+                "method":"real Slint window with scene-dispatched pointer and key events; not OS input automation",
+                "checks":[
+                    "close and image replacement require an explicit discard",
+                    "destructive confirmation defaults to cancel",
+                    "modal pointer and keyboard blocking",
+                    "Escape and cancel preserve feedback and invalid draft",
+                    "self-drawn delete confirmation and undo",
+                    "self-drawn error acknowledgement",
+                    "confirmed replacement loads a clean image",
+                    "clear current keeps image and supports one-step undo/redo",
+                    "real key input, undo and redo in focused note editor"
+                ]
+            });
+            std::fs::write(
+                folder.join("dialog-report.json"),
+                serde_json::to_vec_pretty(&report).unwrap(),
+            )
+            .map_err(|e| e.to_string())?;
+            let watchdog = ui.as_weak();
+            let failed = failure.clone();
+            let output = folder.clone();
+            slint::Timer::single_shot(Duration::from_millis(500), move || {
+                if let Some(ui) = watchdog.upgrade() {
+                    fail(
+                        &ui,
+                        &output,
+                        &failed,
+                        "discard did not close the editor".into(),
+                    );
+                }
+            });
+            primary(&ui);
             Ok(())
         })();
-        if stage == 2 && result.is_ok() {
-            let result = (|| -> Result<(), String> {
-                require(
-                    !ui.get_loaded() && state.borrow().doc().is_none() && !ui.get_confirm_visible(),
-                    "save-and-new did not finish before clearing the workspace",
-                )?;
-                let (saved, asset) = storage::open_project(&folder.join("confirmed-save.ifp"))?;
-                require(
-                    saved.annotations.len() == expected.annotations.len() + 1,
-                    "save-and-new lost the current annotations",
-                )?;
-                let thumb = preview(&asset);
-                install(&ui, &mut state.borrow_mut(), saved, asset, None, thumb);
-                ui.invoke_add_global();
-                ui.invoke_new_project();
-                window_pointer_click(&ui, ui.get_confirm_discard_x(), ui.get_confirm_discard_y());
-                require(
-                    !ui.get_loaded() && !ui.get_confirm_visible(),
-                    "discard-and-new did not clear the workspace",
-                )?;
-                let (saved, asset) = storage::open_project(&folder.join("confirmed-save.ifp"))?;
-                let thumb = preview(&asset);
-                install(&ui, &mut state.borrow_mut(), saved, asset, None, thumb);
-                ui.invoke_add_global();
-                close_click(&ui)?;
-                require(
-                    ui.get_confirm_visible(),
-                    "final unsaved close did not prompt",
-                )?;
-                save_window_snapshot(&ui, &folder.join("discard-close.png"))?;
-                let report = serde_json::json!({"result":"passed","method":"real Slint window with scene-dispatched pointer and key events; real asynchronous filesystem save failure and successful save; not OS input automation","checks":["self-drawn close/save prompt","modal pointer and keyboard blocking","Tab navigation and Escape cancellation","cancel preserves data","validation failure retains draft","self-drawn delete confirmation and undo","self-drawn error acknowledgement","save-in-progress controls blocked","filesystem failure retains dialog and data","save succeeds before queued image replacement","discard closes only after explicit choice"],"saved_project":"confirmed-save.ifp"});
-                std::fs::write(
-                    folder.join("dialog-report.json"),
-                    serde_json::to_vec_pretty(&{
-                        let mut report = report;
-                        report["checks"].as_array_mut().unwrap().extend([
-                            serde_json::json!("real key input in focused note editor"),
-                            serde_json::json!("Ctrl/Command+Z undoes pending text and annotation creation"),
-                            serde_json::json!("Shift+Ctrl/Command+Z and Ctrl+Y redo, including after editor removal"),
-                            serde_json::json!("new project: clean reset, cancellation, save-and-new, discard-and-new"),
-                            serde_json::json!("new project clears annotations, image and undo history"),
-                            serde_json::json!("clear current keeps the image, supports cancellation and one-step undo/redo"),
-                        ]);
-                        report
-                    }).unwrap(),
-                )
-                .map_err(|e| e.to_string())?;
-                let watchdog = ui.as_weak();
-                let failed = failure.clone();
-                let output = folder.clone();
-                slint::Timer::single_shot(Duration::from_millis(500), move || {
-                    if let Some(ui) = watchdog.upgrade() {
-                        fail(
-                            &ui,
-                            &output,
-                            &failed,
-                            "discard did not close the editor".into(),
-                        );
-                    }
-                });
-                window_pointer_click(&ui, ui.get_confirm_discard_x(), ui.get_confirm_discard_y());
-                Ok(())
-            })();
-            if let Err(error) = result {
-                fail(&ui, &folder, &failure, error);
-            }
-            return;
-        }
         if let Err(error) = result {
             fail(&ui, &folder, &failure, error);
         }

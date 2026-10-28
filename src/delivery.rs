@@ -3,9 +3,8 @@ use crate::document::{AnnotationKind, Document};
 use crate::storage::{self, Asset};
 use base64::Engine;
 use std::fs::{self, File};
-use std::io::{self, BufReader, BufWriter, Read, Write};
+use std::io::Read;
 use std::path::{Path, PathBuf};
-use zip::{ZipWriter, write::SimpleFileOptions};
 
 pub const MAX_EMBEDDED_BYTES: u64 = 4 * 1024 * 1024;
 #[derive(Clone, Debug)]
@@ -13,9 +12,6 @@ pub struct PreparedFeedback {
     pub folder: PathBuf,
     pub original: PathBuf,
     pub reference: PathBuf,
-    pub markdown: PathBuf,
-    pub manifest: PathBuf,
-    pub archive: PathBuf,
 }
 impl PreparedFeedback {
     pub fn clipboard_text(&self, doc: &Document) -> String {
@@ -31,20 +27,14 @@ impl PreparedFeedback {
             text.push_str("坐标：原图像素；范围=(x, y, 宽, 高)。\n");
         }
         text.push('\n');
-        append_annotations_with_style(&mut text, doc, true);
+        append_annotations(&mut text, doc);
         text
     }
     pub fn is_complete(&self) -> bool {
         self.folder.is_dir()
-            && [
-                &self.original,
-                &self.reference,
-                &self.markdown,
-                &self.manifest,
-                &self.archive,
-            ]
-            .iter()
-            .all(|p| p.is_file())
+            && [&self.original, &self.reference]
+                .iter()
+                .all(|p| p.is_file())
     }
     /// Optional machine-readable format. Receivers must decode image data, not just read it as prose.
     pub fn embedded_text(&self, doc: &Document) -> Result<String, String> {
@@ -55,7 +45,7 @@ impl PreparedFeedback {
             .map_err(|e| e.to_string())?
             .len();
         if original_size.saturating_add(reference_size) > MAX_EMBEDDED_BYTES {
-            return Err("两张图片合计超过 4 MiB，Base64 会过长。请发送反馈压缩包。".into());
+            return Err("两张图片合计超过 4 MiB，Base64 会过长。请另附原图和修改意见。".into());
         }
         let original = bounded_read(&self.original, MAX_EMBEDDED_BYTES)?;
         let reference = bounded_read(
@@ -81,7 +71,7 @@ fn bounded_read(path: &Path, max: u64) -> Result<Vec<u8>, String> {
         .read_to_end(&mut bytes)
         .map_err(|e| e.to_string())?;
     if bytes.len() as u64 > max {
-        return Err("图片数据超过便携复制上限，请发送反馈包。".into());
+        return Err("图片数据超过便携复制上限，请另附原图和修改意见。".into());
     }
     Ok(bytes)
 }
@@ -101,68 +91,19 @@ pub fn verified_source_path(asset: &Asset) -> Option<PathBuf> {
 }
 pub fn prepare(root: &Path, doc: &Document, asset: &Asset) -> Result<PreparedFeedback, String> {
     let root = std::path::absolute(root).map_err(|e| e.to_string())?;
-    fs::create_dir_all(&root).map_err(|e| format!("无法创建本机交付目录：{e}"))?;
-    let folder = storage::export_package(&root, doc, asset)?;
-    let name = format!("original.{}", asset.extension);
+    fs::create_dir_all(&root).map_err(|e| format!("无法创建本机图片快照目录：{e}"))?;
+    let folder = storage::prepare_snapshot(&root, doc, asset)?;
     let output = PreparedFeedback {
-        original: folder.join(&name),
+        original: folder.join(format!("original.{}", asset.extension)),
         reference: folder.join("reference.png"),
-        markdown: folder.join("feedback.md"),
-        manifest: folder.join("feedback.json"),
-        archive: folder.join("feedback-package.zip"),
         folder,
     };
-    let mut markdown = header(doc);
-    markdown.push_str(&format!(
-        "原图：[{name}]({name})\n\n编号参考图：[reference.png](reference.png)\n\n"
-    ));
-    append_annotations(&mut markdown, doc);
-    fs::write(&output.markdown, markdown).map_err(|e| e.to_string())?;
-    let file = File::options()
-        .write(true)
-        .create_new(true)
-        .open(&output.archive)
-        .map_err(|e| e.to_string())?;
-    let mut zip = ZipWriter::new(BufWriter::new(file));
-    for (name, path, image) in [
-        (&name[..], &output.original, true),
-        ("reference.png", &output.reference, true),
-        ("feedback.md", &output.markdown, false),
-        ("feedback.json", &output.manifest, false),
-    ] {
-        zip.start_file(
-            name,
-            SimpleFileOptions::default().compression_method(if image {
-                zip::CompressionMethod::Stored
-            } else {
-                zip::CompressionMethod::Deflated
-            }),
-        )
-        .map_err(|e| e.to_string())?;
-        io::copy(
-            &mut BufReader::new(File::open(path).map_err(|e| e.to_string())?),
-            &mut zip,
-        )
-        .map_err(|e| e.to_string())?;
-    }
-    let mut writer = zip.finish().map_err(|e| e.to_string())?;
-    writer.flush().map_err(|e| e.to_string())?;
-    writer.get_ref().sync_all().map_err(|e| e.to_string())?;
     if !output.is_complete() {
-        return Err("反馈交付文件缺失".into());
+        return Err("图片快照文件缺失".into());
     }
     Ok(output)
 }
-fn header(doc: &Document) -> String {
-    format!(
-        "# 图片修改意见\n\n图片：{}（{} × {} 像素）\n坐标以原图像素为准；原图保持不变。\n\n",
-        doc.image.file_name, doc.image.width, doc.image.height
-    )
-}
 fn append_annotations(text: &mut String, doc: &Document) {
-    append_annotations_with_style(text, doc, false);
-}
-fn append_annotations_with_style(text: &mut String, doc: &Document, compact: bool) {
     for (index, note) in doc.annotations.iter().enumerate() {
         let location = match note.kind {
             AnnotationKind::Point { point } => format!("点位置 ({:.0}, {:.0})", point.x, point.y),
@@ -183,29 +124,16 @@ fn append_annotations_with_style(text: &mut String, doc: &Document, compact: boo
             ),
             AnnotationKind::Global => "全局意见".into(),
         };
-        if compact {
-            let comment = if note.text.trim().is_empty() {
-                "（按标记的位置／布局调整）"
-            } else {
-                note.text.trim()
-            };
-            text.push_str(&format!(
-                "{}. {}：{}\n",
-                index + 1,
-                location,
-                comment.replace('\n', "\n   ")
-            ));
-            continue;
-        }
+        let comment = if note.text.trim().is_empty() {
+            "（按标记的位置／布局调整）"
+        } else {
+            note.text.trim()
+        };
         text.push_str(&format!(
-            "{}. {}\n   {}\n\n",
+            "{}. {}：{}\n",
             index + 1,
             location,
-            if note.text.trim().is_empty() {
-                "（按标记的位置／布局调整）"
-            } else {
-                note.text.trim()
-            }
+            comment.replace('\n', "\n   ")
         ));
     }
 }
@@ -216,7 +144,6 @@ mod tests {
     use image::{Rgba, RgbaImage};
     use std::sync::atomic::{AtomicU64, Ordering};
     use std::time::{SystemTime, UNIX_EPOCH};
-    use zip::ZipArchive;
     struct Temp(PathBuf);
     impl Temp {
         fn new() -> Self {
@@ -269,7 +196,7 @@ mod tests {
         let p = prepare(&t.0, &d, &a).unwrap();
         assert_eq!(fs::read(&p.original).unwrap(), a.original);
         assert!(p.is_complete());
-        assert_eq!(fs::read_dir(&p.folder).unwrap().count(), 5);
+        assert_eq!(fs::read_dir(&p.folder).unwrap().count(), 2);
         let text = p.clipboard_text(&d);
         assert!(p.original.is_absolute());
         assert!(text.starts_with(&format!("原图：{}\n", p.original.display())));
@@ -334,36 +261,15 @@ mod tests {
         assert!(!text.contains("reference.png"));
     }
     #[test]
-    fn zip_has_exactly_four_known_files_and_portable_links() {
-        let t = Temp::new();
-        let (d, a) = sample();
-        let p = prepare(&t.0, &d, &a).unwrap();
-        let mut z = ZipArchive::new(File::open(&p.archive).unwrap()).unwrap();
-        assert_eq!(z.len(), 4);
-        for name in [
-            "original.png",
-            "reference.png",
-            "feedback.md",
-            "feedback.json",
-        ] {
-            assert!(z.by_name(name).is_ok());
-        }
-        assert!(z.by_name("feedback-package.zip").is_err());
-        let md = fs::read_to_string(&p.markdown).unwrap();
-        assert!(md.contains("[original.png](original.png)"));
-        assert!(md.contains("[reference.png](reference.png)"));
-        assert!(!md.contains(p.folder.to_str().unwrap()));
-    }
-    #[test]
-    fn repeated_export_never_overwrites_prior_snapshot() {
+    fn repeated_snapshot_never_overwrites_previous_image() {
         let t = Temp::new();
         let (mut d, a) = sample();
         let first = prepare(&t.0, &d, &a).unwrap();
-        let old = fs::read(&first.archive).unwrap();
+        let old = fs::read(&first.original).unwrap();
         d.set_text(1, "新版意见".into()).unwrap();
         let second = prepare(&t.0, &d, &a).unwrap();
         assert_ne!(first.folder, second.folder);
-        assert_eq!(fs::read(first.archive).unwrap(), old);
+        assert_eq!(fs::read(first.original).unwrap(), old);
         fs::remove_file(&second.reference).unwrap();
         assert!(!second.is_complete());
     }

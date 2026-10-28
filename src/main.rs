@@ -70,13 +70,11 @@ enum CopyRequest {
 #[derive(Clone, Debug)]
 struct DeliveryCache {
     snapshot: Document,
-    package: PreparedFeedback,
+    prepared: PreparedFeedback,
     source: Option<PathBuf>,
 }
 enum Work {
-    Loaded(Result<(Document, Asset, Option<PathBuf>, RgbaImage), String>),
-    Saved(Result<PathBuf, String>, Document),
-    Exported(Result<DeliveryCache, String>),
+    Loaded(Result<(Document, Asset, RgbaImage), String>),
     Delivered(
         Result<(DeliveryCache, Result<String, String>), String>,
         CopyRequest,
@@ -84,17 +82,14 @@ enum Work {
 }
 #[derive(Clone, Debug, PartialEq)]
 enum PendingAction {
-    New,
     Close,
-    Load { path: PathBuf, project: bool },
+    Load { path: PathBuf },
     Demo { annotated: bool },
     Paste,
 }
 #[derive(Clone, Debug)]
-struct SaveConfirmation {
+struct ActionConfirmation {
     action: PendingAction,
-    saving: bool,
-    error: String,
 }
 #[derive(Clone, Debug)]
 enum MessageAction {
@@ -115,8 +110,6 @@ struct AppMessage {
 struct Editor {
     history: Option<History>,
     asset: Option<Arc<Asset>>,
-    project: Option<PathBuf>,
-    saved: Option<Document>,
     selected: Option<u64>,
     pending: Option<(u64, String)>,
     gesture: Option<Gesture>,
@@ -125,7 +118,7 @@ struct Editor {
     preview_scale: f32,
     preview_scale_y: f32,
     worker: Option<mpsc::Receiver<Work>>,
-    confirmation: Option<SaveConfirmation>,
+    confirmation: Option<ActionConfirmation>,
     message: Option<AppMessage>,
     smart_enabled: bool,
     analysis: Option<AnalysisService>,
@@ -151,8 +144,6 @@ impl Default for Editor {
         Self {
             history: None,
             asset: None,
-            project: None,
-            saved: None,
             selected: None,
             pending: None,
             gesture: None,
@@ -217,43 +208,11 @@ impl Editor {
         self.delivery = None;
         Ok(())
     }
-    fn new_project(&mut self) {
-        if let Some(analysis) = self.analysis.as_ref() {
-            analysis.cancel();
-        }
-        self.history = None;
-        self.asset = None;
-        self.project = None;
-        self.saved = None;
-        self.selected = None;
-        self.pending = None;
-        self.gesture = None;
-        self.view = View {
-            scale: 1.,
-            fit: true,
-            ..Default::default()
-        };
-        self.tool = 0;
-        self.preview_scale = 1.;
-        self.preview_scale_y = 1.;
-        self.analysis_loading = false;
-        self.candidates.clear();
-        self.eligible.clear();
-        self.ownership.clear();
-        self.hover = None;
-        self.hover_point = None;
-        self.delivery = None;
-        self.revealed_selection = None;
-    }
     fn doc(&self) -> Option<&Document> {
         self.history.as_ref().map(History::document)
     }
-    fn dirty(&self) -> bool {
-        self.pending.as_ref().is_some_and(|(id, text)| {
-            self.doc()
-                .and_then(|d| d.annotation(*id))
-                .is_some_and(|n| n.text != *text)
-        }) || self.doc().is_some_and(|d| self.saved.as_ref() != Some(d))
+    fn has_feedback(&self) -> bool {
+        self.doc().is_some_and(|doc| !doc.annotations.is_empty()) || self.pending.is_some()
     }
     fn flush(&mut self) -> Result<(), String> {
         if let Some((id, text)) = self.pending.take() {
@@ -270,59 +229,19 @@ impl Editor {
         if self.worker.is_some() || self.confirmation.is_some() || self.message.is_some() {
             return None;
         }
-        if self.dirty() {
+        if self.has_feedback() {
             self.gesture = None;
-            self.confirmation = Some(SaveConfirmation {
-                action,
-                saving: false,
-                error: String::new(),
-            });
+            self.confirmation = Some(ActionConfirmation { action });
             None
         } else {
             Some(action)
         }
     }
     fn cancel_confirmation(&mut self) {
-        if self.confirmation.as_ref().is_some_and(|c| !c.saving) {
-            self.confirmation = None;
-        }
+        self.confirmation = None;
     }
     fn discard_confirmation(&mut self) -> Option<PendingAction> {
-        if self.confirmation.as_ref().is_some_and(|c| !c.saving) {
-            self.confirmation.take().map(|c| c.action)
-        } else {
-            None
-        }
-    }
-    fn start_confirmed_save(&mut self) -> bool {
-        let Some(confirmation) = self.confirmation.as_mut() else {
-            return false;
-        };
-        if confirmation.saving || self.worker.is_some() {
-            return false;
-        }
-        confirmation.saving = true;
-        confirmation.error.clear();
-        true
-    }
-    fn save_problem(&mut self, error: impl Into<String>) {
-        if let Some(c) = self.confirmation.as_mut() {
-            c.saving = false;
-            c.error = error.into();
-        }
-    }
-    fn saved_successfully(&mut self, path: PathBuf, snapshot: Document) -> Option<PendingAction> {
-        self.project = Some(path);
-        self.saved = Some(snapshot);
-        if !self.confirmation.as_ref().is_some_and(|c| c.saving) {
-            return None;
-        }
-        if self.dirty() {
-            self.save_problem("保存期间出现了新的修改，请再次保存或取消返回编辑。");
-            None
-        } else {
-            self.confirmation.take().map(|c| c.action)
-        }
+        self.confirmation.take().map(|c| c.action)
     }
     fn point(&self, x: f32, y: f32) -> Point {
         Point {
@@ -741,17 +660,15 @@ fn preview(asset: &Asset) -> RgbaImage {
 }
 fn sync_confirmation(ui: &AppWindow, e: &Editor) {
     ui.set_confirm_cancel_label("取消".into());
-    ui.set_confirm_discard_label("不保存".into());
     if let Some(message) = e.message.as_ref() {
         ui.set_confirm_title(message.title.clone().into());
         ui.set_confirm_description(message.description.clone().into());
         ui.set_confirm_name(message.name.clone().into());
-        ui.set_confirm_save_label(message.primary.clone().into());
+        ui.set_confirm_primary_label(message.primary.clone().into());
         ui.set_confirm_show_cancel(matches!(
             message.action,
             MessageAction::Remove(_) | MessageAction::ClearFeedback
         ));
-        ui.set_confirm_show_discard(false);
         ui.set_confirm_destructive(message.destructive);
         ui.set_confirm_footnote(
             if matches!(message.action, MessageAction::Remove(_)) {
@@ -763,58 +680,45 @@ fn sync_confirmation(ui: &AppWindow, e: &Editor) {
             }
             .into(),
         );
-        ui.set_confirm_error("".into());
-        ui.set_confirm_saving(false);
         ui.set_confirm_visible(true);
     } else if let Some(c) = e.confirmation.as_ref() {
-        ui.set_confirm_show_cancel(true);
-        ui.set_confirm_show_discard(true);
-        ui.set_confirm_destructive(false);
-        ui.set_confirm_footnote("保存为可继续编辑的项目，不会覆盖原图。".into());
         let closing = matches!(c.action, PendingAction::Close);
+        ui.set_confirm_show_cancel(true);
+        ui.set_confirm_destructive(true);
         ui.set_confirm_title(
             if closing {
-                "保存修改后再关闭？"
-            } else if matches!(c.action, PendingAction::New) {
-                "新建前保存当前项目？"
+                "关闭当前图片？"
             } else {
-                "先保存当前修改？"
+                "替换当前图片？"
             }
             .into(),
         );
         ui.set_confirm_description(
             if closing {
-                "未保存的批注和位置调整将丢失。保存后，可随时回来继续编辑。"
-            } else if matches!(c.action, PendingAction::New) {
-                "新建后将返回空白工作区。请先保存当前批注和位置调整，或选择不保存。"
+                "关闭后将无法继续编辑当前批注，原图不会改变。"
             } else {
-                "即将替换当前图片或项目。请先保存，或明确选择不保存。"
+                "换图后将无法继续编辑当前批注，原图不会改变。"
             }
             .into(),
         );
         ui.set_confirm_name(
             e.doc()
                 .map(|d| d.image.file_name.as_str())
-                .unwrap_or("当前项目")
+                .unwrap_or("当前图片")
                 .into(),
         );
-        ui.set_confirm_error(c.error.clone().into());
-        ui.set_confirm_saving(c.saving);
-        ui.set_confirm_save_label(
+        ui.set_confirm_footnote("请先复制需要保留的反馈。".into());
+        ui.set_confirm_primary_label(
             if closing {
-                "保存并关闭"
-            } else if matches!(c.action, PendingAction::New) {
-                "保存并新建"
+                "关闭并丢弃"
             } else {
-                "保存并继续"
+                "替换并丢弃"
             }
             .into(),
         );
         ui.set_confirm_visible(true);
     } else {
         ui.set_confirm_visible(false);
-        ui.set_confirm_saving(false);
-        ui.set_confirm_error("".into());
     }
 }
 fn sync(ui: &AppWindow, e: &mut Editor) {
@@ -840,7 +744,6 @@ fn sync(ui: &AppWindow, e: &mut Editor) {
         ui.set_can_reset_view(false);
         ui.set_source_image(slint::Image::default());
         ui.set_image_name("尚未导入图片".into());
-        ui.set_dirty(false);
         ui.set_can_undo(false);
         ui.set_can_redo(false);
         ui.set_note_count(0);
@@ -853,7 +756,6 @@ fn sync(ui: &AppWindow, e: &mut Editor) {
     };
     ui.set_loaded(true);
     ui.set_image_name(doc.image.file_name.clone().into());
-    ui.set_dirty(e.dirty());
     ui.set_can_undo(e.history.as_ref().is_some_and(History::can_undo));
     ui.set_can_redo(e.history.as_ref().is_some_and(History::can_redo));
     ui.set_tool(e.tool);
@@ -1039,22 +941,10 @@ fn reconcile_note_rows(model: &VecModel<NoteRow>, rows: Vec<NoteRow>) {
 }
 fn perform_action(ui: &AppWindow, e: &mut Editor, timer: &Rc<slint::Timer>, action: PendingAction) {
     match action {
-        PendingAction::New => {
-            e.new_project();
-            ui.set_preview_visible(false);
-            ui.set_hover_visible(false);
-            ui.set_toast_visible(false);
-            ui.set_copy_complete(false);
-            ui.set_space_held(false);
-            ui.set_shift_held(false);
-            sync(ui, e);
-            ui.invoke_focus_canvas();
-            set_status(ui, "新项目已就绪 · 导入或粘贴图片开始反馈");
-        }
         PendingAction::Close => {
             let _ = ui.hide();
         }
-        PendingAction::Load { path, project } => load_path_unchecked(ui, e, timer, path, project),
+        PendingAction::Load { path } => load_path_unchecked(ui, e, timer, path),
         PendingAction::Demo { annotated } => load_demo_unchecked(ui, e, timer, annotated),
         PendingAction::Paste => paste_image_unchecked(ui, e, timer),
     }
@@ -1102,17 +992,10 @@ fn confirmation_response(ui: &AppWindow, e: &mut Editor, timer: &Rc<slint::Timer
     }
     match response {
         0 => e.cancel_confirmation(),
-        1 => {
+        2 => {
             if let Some(action) = e.discard_confirmation() {
                 sync_confirmation(ui, e);
                 perform_action(ui, e, timer, action);
-                return;
-            }
-        }
-        2 => {
-            if e.start_confirmed_save() {
-                sync_confirmation(ui, e);
-                save(ui, e, timer);
                 return;
             }
         }
@@ -1182,14 +1065,7 @@ fn request_remove(ui: &AppWindow, e: &mut Editor, id: u64) {
     }
     sync(ui, e);
 }
-fn install(
-    ui: &AppWindow,
-    e: &mut Editor,
-    doc: Document,
-    asset: Asset,
-    path: Option<PathBuf>,
-    thumb: RgbaImage,
-) {
+fn install(ui: &AppWindow, e: &mut Editor, doc: Document, asset: Asset, thumb: RgbaImage) {
     let pixels = slint::SharedPixelBuffer::<slint::Rgba8Pixel>::clone_from_slice(
         thumb.as_raw(),
         thumb.width(),
@@ -1198,10 +1074,8 @@ fn install(
     ui.set_source_image(slint::Image::from_rgba8(pixels));
     e.preview_scale = thumb.width() as f32 / asset.pixels.width() as f32;
     e.preview_scale_y = thumb.height() as f32 / asset.pixels.height() as f32;
-    e.saved = Some(doc.clone());
     e.history = Some(History::new(doc));
     e.asset = Some(Arc::new(asset));
-    e.project = path;
     e.delivery = None;
     e.revealed_selection = None;
     e.selected = None;
@@ -1240,94 +1114,25 @@ fn start_work(
     // Timer is started by the caller after the callback has been installed at startup.
     timer.restart();
 }
-fn save_problem(ui: &AppWindow, e: &mut Editor, error: impl Into<String>) {
-    let error = error.into();
-    if e.confirmation.is_some() {
-        e.save_problem(error.clone());
-        sync_confirmation(ui, e);
-    } else {
-        show_message(ui, e, "保存未完成", error.clone());
-    }
-    set_status(ui, format!("保存未完成：{error}"));
+fn load_path(ui: &AppWindow, e: &mut Editor, timer: &Rc<slint::Timer>, path: PathBuf) {
+    begin_action(ui, e, timer, PendingAction::Load { path });
 }
-fn save(ui: &AppWindow, e: &mut Editor, timer: &Rc<slint::Timer>) {
+fn load_path_unchecked(ui: &AppWindow, e: &mut Editor, timer: &Rc<slint::Timer>, path: PathBuf) {
     if e.worker.is_some() {
         return;
     }
-    if let Err(err) = e.flush() {
-        save_problem(ui, e, err);
-        return;
-    }
-    let (Some(doc), Some(asset)) = (e.doc().cloned(), e.asset.clone()) else {
-        save_problem(ui, e, "没有可保存的图片数据");
-        return;
-    };
-    let path = match e.project.clone() {
-        Some(p) => p,
-        None => {
-            let Some(p) = rfd::FileDialog::new()
-                .set_title("保存可恢复项目")
-                .add_filter("图片反馈项目", &["ifp"])
-                .set_file_name("图片反馈.ifp")
-                .save_file()
-            else {
-                if e.confirmation.is_some() {
-                    save_problem(
-                        ui,
-                        e,
-                        "未选择保存位置。当前修改仍保留，可重试或取消返回编辑。",
-                    );
-                } else {
-                    set_status(ui, "已取消保存，当前修改仍保留");
-                }
-                return;
-            };
-            p
-        }
-    };
-    set_status(ui, "正在保存项目…");
-    let snapshot = doc.clone();
+    set_status(ui, "正在读取图片…");
     start_work(ui, e, timer, move || {
-        Work::Saved(
-            storage::save_project(&path, &doc, &asset).map(|_| path),
-            snapshot,
-        )
-    });
-}
-fn load_path(
-    ui: &AppWindow,
-    e: &mut Editor,
-    timer: &Rc<slint::Timer>,
-    path: PathBuf,
-    project: bool,
-) {
-    begin_action(ui, e, timer, PendingAction::Load { path, project });
-}
-fn load_path_unchecked(
-    ui: &AppWindow,
-    e: &mut Editor,
-    timer: &Rc<slint::Timer>,
-    path: PathBuf,
-    project: bool,
-) {
-    if e.worker.is_some() {
-        return;
-    }
-    set_status(ui, "正在读取图片与项目…");
-    start_work(ui, e, timer, move || {
-        let result = (|| {
-            let (doc, asset, path) = if project {
-                let (d, a) = storage::open_project(&path)?;
-                (d, a, Some(path))
-            } else {
-                let a = Asset::open(&path)?;
-                let d = Document::new(a.name.clone(), a.pixels.width(), a.pixels.height())?;
-                (d, a, None)
-            };
+        Work::Loaded((|| {
+            let asset = Asset::open(&path)?;
+            let doc = Document::new(
+                asset.name.clone(),
+                asset.pixels.width(),
+                asset.pixels.height(),
+            )?;
             let thumb = preview(&asset);
-            Ok((doc, asset, path, thumb))
-        })();
-        Work::Loaded(result)
+            Ok((doc, asset, thumb))
+        })())
     });
 }
 fn load_demo(ui: &AppWindow, e: &mut Editor, timer: &Rc<slint::Timer>, annotated: bool) {
@@ -1364,7 +1169,7 @@ fn load_demo_unchecked(ui: &AppWindow, e: &mut Editor, timer: &Rc<slint::Timer>,
                 d.set_text(id, "按钮颜色再醒目一些".into())?;
             }
             let thumb = preview(&a);
-            Ok((d, a, None, thumb))
+            Ok((d, a, thumb))
         })())
     });
 }
@@ -1388,7 +1193,7 @@ fn paste_image_unchecked(ui: &AppWindow, e: &mut Editor, timer: &Rc<slint::Timer
                 asset.pixels.height(),
             )?;
             let thumb = preview(&asset);
-            Ok((doc, asset, None, thumb))
+            Ok((doc, asset, thumb))
         })())
     });
 }
@@ -1717,20 +1522,17 @@ fn smoke_interactions(
     let e = state.borrow();
     let doc = e.doc().unwrap();
     let asset = e.asset.as_ref().unwrap();
-    let path = folder.join("smoke-project.ifp");
-    storage::save_project(&path, doc, asset)?;
-    let (restored, original) = storage::open_project(&path)?;
-    if &restored != doc || original.original != asset.original {
-        return Err("portable project roundtrip mismatch".into());
+    let prepared = delivery::prepare(&folder.join("images"), doc, asset)?;
+    if std::fs::read(&prepared.original).map_err(|e| e.to_string())? != asset.original {
+        return Err("snapshot did not preserve the original image".into());
     }
-    let package = storage::export_package(folder, doc, asset)?;
-    let report = serde_json::json!({"result":"interactions_passed","platform":std::env::consts::OS,"native_chrome":ui.get_native_chrome(),"appkit_quit_guard_checked":cfg!(target_os="macos"),"slint":"1.18.1","method":"real Slint window; scene-dispatched pointer events for hover/selection/drag/copy/close, callbacks for editing commands; isolated clipboard sink, not OS mouse automation","checks":["unpressed hover through the real TouchArea event bridge","hover exit and re-entry","single forwarding for each drag pointer event","copy after movement includes coordinates and success toast","clipboard failure notification and retry","platform close uses the existing save guard; native AppKit Quit is also checked on macOS","native hover without document mutation","click adopts pressed recommendation","smart toggle with manual fallback","region selection","Chinese note commit","region to block drag","point annotation","global annotation","undo and redo callbacks","pointer-anchored zoom","portable project roundtrip","unchanged original bytes","four-file feedback export"],"annotations":doc.annotations.len(),"package":package,"screenshot":"editor.png"});
+    let report = serde_json::json!({"result":"interactions_passed","platform":std::env::consts::OS,"native_chrome":ui.get_native_chrome(),"appkit_quit_guard_checked":cfg!(target_os="macos"),"slint":"1.18.1","method":"real Slint window; scene-dispatched pointer events for hover/selection/drag/copy/close, callbacks for editing commands; isolated clipboard sink, not OS mouse automation","checks":["unpressed hover through the real TouchArea event bridge","hover exit and re-entry","single forwarding for each drag pointer event","copy after movement includes coordinates and success toast","clipboard failure notification and retry","platform close uses the discard guard; native AppKit Quit is also checked on macOS","native hover without document mutation","click adopts pressed recommendation","smart toggle with manual fallback","region selection","Chinese note commit","region to block drag","point annotation","global annotation","undo and redo callbacks","pointer-anchored zoom","durable snapshot preserves original bytes"],"annotations":doc.annotations.len(),"screenshot":"editor.png"});
     std::fs::write(
         folder.join("smoke-report.json"),
         serde_json::to_vec_pretty(&report).unwrap(),
     )
     .map_err(|e| e.to_string())?;
-    set_status(ui, "交互与保存／导出自检通过 · 这是原生 Slint 窗口实机截图");
+    set_status(ui, "交互与复制自检通过 · 这是原生 Slint 窗口实机截图");
     Ok(())
 }
 
@@ -1764,7 +1566,7 @@ fn run_editor(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
         }
         return show_notice_window(
             "编辑器已在运行",
-            "请切换至已有窗口，避免重复加载图片。当前已打开的项目不会受到影响。",
+            "请切换至已有窗口，避免重复加载图片。当前图片和批注不会受到影响。",
         );
     }
     let ui = create_app_window()?;
@@ -1812,10 +1614,7 @@ fn run_editor(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
                 WindowEvent::DroppedFile(path) => {
                     if let Some(ui) = weak.upgrade() {
                         let path = path.clone();
-                        let project = path
-                            .extension()
-                            .is_some_and(|s| s.eq_ignore_ascii_case("ifp"));
-                        load_path(&ui, &mut state.borrow_mut(), &t, path, project);
+                        load_path(&ui, &mut state.borrow_mut(), &t, path);
                     }
                     return NativeEventResult::PreventDefault;
                 }
@@ -1953,64 +1752,26 @@ fn run_editor(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
                         t.stop();
                         ui.set_busy(false);
                         match work {
-                            Work::Loaded(Ok((d, a, p, thumb))) => {
-                                install(&ui, &mut e, d, a, p, thumb)
-                            }
+                            Work::Loaded(Ok((d, a, thumb))) => install(&ui, &mut e, d, a, thumb),
                             Work::Loaded(Err(err)) => {
                                 set_status(&ui, format!("读取失败：{err}"));
-                                show_message(&ui, &mut e, "无法读取图片或项目", err);
+                                show_message(&ui, &mut e, "无法读取图片", err);
                             }
-                            Work::Saved(result, snapshot) => match result {
-                                Ok(path) => {
-                                    let action = e.saved_successfully(path, snapshot);
-                                    set_status(&ui, "项目已保存 · 原图与修改意见均可恢复");
-                                    sync(&ui, &mut e);
-                                    if let Some(action) = action {
-                                        perform_action(&ui, &mut e, &t, action);
-                                    } else if e.confirmation.is_none() {
-                                        show_toast(&ui,&notifications,true,"项目已保存","原图与修改意见均可恢复。");ui.set_copy_complete(false);
-                                    }
-                                }
-                                Err(err) => save_problem(&ui, &mut e, err),
-                            },
-                            Work::Delivered(result,request)=>copy_control::finish(&ui,&mut e,&notifications,result,request),
-                            Work::Exported(result) => match result {
-                                Ok(cache) => {
-                                    set_status(&ui, format!("已导出完整反馈包：{}", cache.package.folder.display()));
-                                    e.delivery=Some(cache);sync(&ui,&mut e);
-                                    show_toast(&ui,&notifications,true,"反馈包已导出","包含原图、编号参考图和可发送的 ZIP。\n可从更多菜单打开最近反馈包。");ui.set_copy_complete(false);
-                                }
-                                Err(err) => {
-                                    set_status(&ui, format!("导出失败：{err}"));
-                                    show_message(
-                                        &ui,
-                                        &mut e,
-                                        "导出未完成",
-                                        format!(
-                                            "{err}\n目标目录可能保留部分文件，当前编辑数据未丢失。"
-                                        ),
-                                    );
-                                }
-                            },
+                            Work::Delivered(result, request) => {
+                                copy_control::finish(&ui, &mut e, &notifications, result, request)
+                            }
                         }
                     }
                     Some(Err(mpsc::TryRecvError::Disconnected)) => {
                         e.worker = None;
                         t.stop();
                         ui.set_busy(false);
-                        if e.confirmation.is_some() {
-                            e.save_problem(
-                                "后台任务异常结束，当前编辑数据仍保留。可重试或取消返回编辑。",
-                            );
-                            sync_confirmation(&ui, &e);
-                        } else {
-                            show_message(
-                                &ui,
-                                &mut e,
-                                "后台任务未完成",
-                                "任务异常结束，当前编辑数据仍保留。请重试。",
-                            );
-                        }
+                        show_message(
+                            &ui,
+                            &mut e,
+                            "后台任务未完成",
+                            "任务异常结束，当前编辑数据仍保留。请重试。",
+                        );
                         set_status(&ui, "后台任务异常结束，当前编辑数据仍保留");
                     }
                     _ => {}
@@ -2083,16 +1844,6 @@ fn run_editor(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
     {
         let weak = ui.as_weak();
         let state = editor.clone();
-        let t = timer.clone();
-        ui.on_new_project(move || {
-            if let Some(ui) = weak.upgrade() {
-                begin_action(&ui, &mut state.borrow_mut(), &t, PendingAction::New);
-            }
-        });
-    }
-    {
-        let weak = ui.as_weak();
-        let state = editor.clone();
         ui.on_clear_feedback(move || {
             let Some(ui) = weak.upgrade() else {
                 return;
@@ -2135,25 +1886,7 @@ fn run_editor(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
             else {
                 return;
             };
-            load_path(&ui, &mut state.borrow_mut(), &t, path, false);
-        });
-    }
-    {
-        let weak = ui.as_weak();
-        let state = editor.clone();
-        let t = timer.clone();
-        ui.on_open_project(move || {
-            let Some(ui) = weak.upgrade() else {
-                return;
-            };
-            let Some(path) = rfd::FileDialog::new()
-                .set_title("打开项目")
-                .add_filter("图片反馈项目", &["ifp"])
-                .pick_file()
-            else {
-                return;
-            };
-            load_path(&ui, &mut state.borrow_mut(), &t, path, true);
+            load_path(&ui, &mut state.borrow_mut(), &t, path);
         });
     }
     {
@@ -2170,53 +1903,11 @@ fn run_editor(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
         let weak = ui.as_weak();
         let state = editor.clone();
         let t = timer.clone();
-        ui.on_save_project(move || {
-            if let Some(ui) = weak.upgrade() {
-                save(&ui, &mut state.borrow_mut(), &t);
-            }
-        });
-    }
-    {
-        let weak = ui.as_weak();
-        let state = editor.clone();
-        let t = timer.clone();
         ui.on_paste_image(move || {
             let Some(ui) = weak.upgrade() else {
                 return;
             };
             begin_action(&ui, &mut state.borrow_mut(), &t, PendingAction::Paste);
-        });
-    }
-    {
-        let weak = ui.as_weak();
-        let state = editor.clone();
-        let t = timer.clone();
-        ui.on_export_package(move || {
-            let Some(ui) = weak.upgrade() else {
-                return;
-            };
-            let mut e = state.borrow_mut();
-            if e.worker.is_some() {
-                return;
-            }
-            if let Err(err) = e.flush() {
-                show_message(&ui, &mut e, "无法完成操作", err);
-                return;
-            }
-            let (Some(doc), Some(asset)) = (e.doc().cloned(), e.asset.clone()) else {
-                return;
-            };
-            let Some(folder) = rfd::FileDialog::new()
-                .set_title("选择反馈包保存目录（将在其中新建文件夹）")
-                .pick_folder()
-            else {
-                return;
-            };
-            sync(&ui, &mut e);
-            set_status(&ui, "正在生成原图、编号参考图、说明与 JSON…");
-            start_work(&ui, &mut e, &t, move || {
-                Work::Exported(copy_control::prepare(&folder, doc, &asset, None))
-            });
         });
     }
     for request in [
@@ -2284,7 +1975,6 @@ fn run_editor(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
                 return;
             };
             e.pending = Some((actual, text.into()));
-            ui.set_dirty(e.dirty());
             let draft_changed = e.pending.as_ref().is_some_and(|(id, text)| {
                 e.doc()
                     .and_then(|d| d.annotation(*id))
@@ -2703,7 +2393,7 @@ fn run_editor(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
                 return slint::CloseRequestResponse::KeepWindowShown;
             }
             if e.worker.is_some() {
-                set_status(&ui, "请等待当前保存／导出完成后再关闭");
+                set_status(&ui, "请等待当前操作完成后再关闭");
                 return slint::CloseRequestResponse::KeepWindowShown;
             }
             if e.message.is_some() {
@@ -2716,7 +2406,7 @@ fn run_editor(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
                 sync_confirmation(&ui, &e);
                 return slint::CloseRequestResponse::KeepWindowShown;
             }
-            if !e.dirty() {
+            if !e.has_feedback() {
                 return slint::CloseRequestResponse::HideWindow;
             }
             begin_action(&ui, &mut e, &t, PendingAction::Close);
@@ -2772,10 +2462,7 @@ fn run_editor(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
         slint::Timer::single_shot(Duration::from_millis(100), move || {
             if let Some(ui) = weak.upgrade() {
                 if let Some(path) = input {
-                    let project = path
-                        .extension()
-                        .is_some_and(|e| e.eq_ignore_ascii_case("ifp"));
-                    load_path(&ui, &mut state.borrow_mut(), &t, path, project);
+                    load_path(&ui, &mut state.borrow_mut(), &t, path);
                 } else if demo {
                     load_demo(&ui, &mut state.borrow_mut(), &t, !smoke);
                 }

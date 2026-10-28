@@ -52,15 +52,20 @@ Name: "{userdesktop}\Image Feedback"; Filename: "{app}\ImageFeedback.exe"; Worki
 
 [Registry]
 Root: HKCU; Subkey: "Software\Microsoft\Windows\CurrentVersion\App Paths\ImageFeedback.exe"; ValueType: string; ValueName: ""; ValueData: "{app}\ImageFeedback.exe"; Flags: uninsdeletekey
-Root: HKCU; Subkey: "Software\Classes\.ifp\OpenWithProgids"; ValueType: string; ValueName: "ImageFeedback.Project"; ValueData: ""; Flags: uninsdeletevalue
-Root: HKCU; Subkey: "Software\Classes\ImageFeedback.Project"; ValueType: string; ValueName: ""; ValueData: "Image Feedback project"; Flags: uninsdeletekey
-Root: HKCU; Subkey: "Software\Classes\ImageFeedback.Project\DefaultIcon"; ValueType: string; ValueName: ""; ValueData: "{app}\ImageFeedback.exe,0"
-Root: HKCU; Subkey: "Software\Classes\ImageFeedback.Project\shell\open\command"; ValueType: string; ValueName: ""; ValueData: """{app}\ImageFeedback.exe"" --open ""%1"""
 
 [Run]
 Filename: "{app}\ImageFeedback.exe"; Description: "Launch Image Feedback"; Flags: nowait postinstall skipifsilent
 
 [Code]
+// Remove only this app's obsolete association when upgrading; leave existing .ifp files untouched.
+procedure CurStepChanged(CurStep: TSetupStep);
+begin
+  if CurStep = ssPostInstall then begin
+    RegDeleteValue(HKCU, 'Software\Classes\.ifp\OpenWithProgids', 'ImageFeedback.Project');
+    RegDeleteKeyIncludingSubkeys(HKCU, 'Software\Classes\ImageFeedback.Project');
+  end;
+end;
+
 function Running(): Boolean;
 begin
   Result := CheckForMutexes('Local\ImageFeedback.Running');
@@ -70,12 +75,12 @@ function InitializeSetup(): Boolean;
 begin
   Result := not Running();
   if (not Result) and (not WizardSilent()) then
-    MsgBox('Please save your work and close BOTH the editor and tray entry before updating Image Feedback. No process will be forcibly closed.', mbError, MB_OK);
+    MsgBox('Please copy any feedback you need and close BOTH the editor and tray entry before updating Image Feedback. No process will be forcibly closed.', mbError, MB_OK);
 end;
 
 function InitializeUninstall(): Boolean;
 begin
   Result := not Running();
   if (not Result) and (not UninstallSilent()) then
-    MsgBox('Please save your work and close BOTH the editor and tray entry first. Your images and project data will be kept.', mbError, MB_OK);
+    MsgBox('Please copy any feedback you need and close BOTH the editor and tray entry first. Your images and existing files will be kept.', mbError, MB_OK);
 end;

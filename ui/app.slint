@@ -254,7 +254,6 @@ export component AppWindow inherits Window {
     in property <bool> loaded: false;
     in property <string> image-name: "尚未导入图片";
     in property <string> status-text: "准备就绪";
-    in property <bool> dirty: false;
     in property <bool> can-undo: false;
     in property <bool> can-redo: false;
     in property <int> tool: 0;
@@ -295,6 +294,11 @@ export component AppWindow inherits Window {
     in property <bool> delivery-ready: false;
     out property <float> zoom-plus-center-x: (zoomPlus.absolute-position.x + zoomPlus.width / 2) / 1px;
     out property <float> zoom-plus-center-y: (zoomPlus.absolute-position.y + zoomPlus.height / 2) / 1px;
+    out property <float> zoom-right-gap: (canvasClip.width - zoomControls.x - zoomControls.width) / 1px;
+    out property <float> copy-button-right: (copyFeedback.absolute-position.x + copyFeedback.width) / 1px;
+    out property <float> copy-button-top: copyFeedback.absolute-position.y / 1px;
+    out property <float> toast-right: (toast.absolute-position.x + toast.width) / 1px;
+    out property <float> toast-bottom: (toast.absolute-position.y + toast.height) / 1px;
     out property <float> reset-view-center-x: (zoomControls.absolute-position.x - 23px) / 1px;
     out property <float> reset-view-center-y: (zoomControls.absolute-position.y + 19px) / 1px;
     out property <float> note-scroll-y: noteScroll.content-y / 1px;
@@ -350,26 +354,20 @@ export component AppWindow inherits Window {
     callback dismiss-toast();
 
     in property <bool> confirm-visible: false;
-    in property <bool> confirm-saving: false;
     in property <string> confirm-title;
     in property <string> confirm-description;
     in property <string> confirm-name;
-    in property <string> confirm-error;
-    in property <string> confirm-save-label: "保存并继续";
-    in property <string> confirm-discard-label: "不保存";
+    in property <string> confirm-primary-label: "确定";
     in property <string> confirm-cancel-label: "取消";
-    in property <bool> confirm-show-discard: true;
     in property <bool> confirm-show-cancel: true;
     in property <bool> confirm-destructive: false;
-    in property <string> confirm-footnote: "保存项目不会覆盖原图";
+    in property <string> confirm-footnote: "";
     in-out property <int> confirm-choice: 2;
     out property <bool> confirm-has-focus: confirmKeys.has-focus;
     out property <float> confirm-cancel-x: (confirmCancel.absolute-position.x + confirmCancel.width / 2) / 1px;
     out property <float> confirm-cancel-y: (confirmCancel.absolute-position.y + confirmCancel.height / 2) / 1px;
-    out property <float> confirm-discard-x: (confirmDiscard.absolute-position.x + confirmDiscard.width / 2) / 1px;
-    out property <float> confirm-discard-y: (confirmDiscard.absolute-position.y + confirmDiscard.height / 2) / 1px;
-    out property <float> confirm-save-x: (confirmSave.absolute-position.x + confirmSave.width / 2) / 1px;
-    out property <float> confirm-save-y: (confirmSave.absolute-position.y + confirmSave.height / 2) / 1px;
+    out property <float> confirm-primary-x: (confirmPrimary.absolute-position.x + confirmPrimary.width / 2) / 1px;
+    out property <float> confirm-primary-y: (confirmPrimary.absolute-position.y + confirmPrimary.height / 2) / 1px;
     callback confirm-response(int);
     changed confirm-visible => {
         if root.confirm-visible {
@@ -383,23 +381,17 @@ export component AppWindow inherits Window {
             if root.has-active-note { root.reveal-note(root.active-note-token); } else { canvasKeys.focus(); }
         }
     }
-    changed confirm-saving => { if root.confirm-visible { confirmKeys.focus(); } }
 
-    callback new-project();
     callback clear-feedback();
     out property <bool> toolbar-fits: fileButtons.absolute-position.x + fileButtons.width <= historyButtons.absolute-position.x
-        && historyButtons.absolute-position.x + historyButtons.width <= saveProjectButton.absolute-position.x
-        && exportPackageButton.absolute-position.x + exportPackageButton.width <= root.width - 20px;
+        && historyButtons.absolute-position.x + historyButtons.width <= root.width - 20px;
     public function focus-copy() { copyFeedback.focus(); }
-    out property <bool> copy-help-visible: (copyFeedback.hovered || copyFeedback.focused) && !root.confirm-visible;
+    out property <bool> copy-help-visible: (copyFeedback.hovered || copyFeedback.focused) && !root.confirm-visible && !root.toast-visible;
     out property <float> clear-feedback-center-x: (clearFeedback.absolute-position.x + clearFeedback.width / 2) / 1px;
     out property <float> clear-feedback-center-y: (clearFeedback.absolute-position.y + clearFeedback.height / 2) / 1px;
     public function focus-canvas() { canvasKeys.focus(); }
     callback import-image();
     callback paste-image();
-    callback open-project();
-    callback save-project();
-    callback export-package();
     callback copy-feedback();
     callback copy-original-path();
     callback copy-portable-data();
@@ -436,7 +428,7 @@ export component AppWindow inherits Window {
         root.viewport-resized(root.viewport-width, root.viewport-height);
     }
 
-    // 项目快捷键覆盖画布、工具栏和批注编辑器；Slint 在 macOS 将 Control 映射为 ⌘。
+    // 编辑快捷键覆盖画布、工具栏和批注编辑器；Slint 在 macOS 将 Control 映射为 ⌘。
     appKeys := FocusScope {
         width: parent.width;
         height: parent.height;
@@ -449,8 +441,6 @@ export component AppWindow inherits Window {
                 }
                 if !event.modifiers.shift {
                     if event.text.to-lowercase() == "y" { root.redo(); return accept; }
-                    if event.text.to-lowercase() == "n" { root.new-project(); return accept; }
-                    if event.text.to-lowercase() == "s" { if root.loaded { root.save-project(); } return accept; }
                     if event.text.to-lowercase() == "o" { root.import-image(); return accept; }
                 }
             }
@@ -461,7 +451,7 @@ export component AppWindow inherits Window {
         Rectangle { x: 0px; y: 0px; width: parent.width; height: parent.height; border-radius: 9px; border-width: 1px; border-color: #dfe3ed; background: #ffffff;
             ActionButton { x: 7px; y: 8px; width: 182px; height: 40px; label: "复制原图路径"; quiet: true; enabled: root.loaded && !root.busy && !root.text-composing; clicked => { helpMenu.close(); root.copy-original-path(); } }
             ActionButton { x: 7px; y: 52px; width: 202px; height: 40px; label: "复制 Base64 便携数据"; quiet: true; enabled: root.loaded && !root.busy && !root.text-composing; clicked => { helpMenu.close(); root.copy-portable-data(); } }
-            ActionButton { x: 7px; y: 96px; width: 202px; height: 40px; label: "打开最近反馈包"; quiet: true; enabled: root.delivery-ready && !root.busy; clicked => { helpMenu.close(); root.open-feedback-folder(); } }
+            ActionButton { x: 7px; y: 96px; width: 202px; height: 40px; label: "打开最近图片快照"; quiet: true; enabled: root.delivery-ready && !root.busy; clicked => { helpMenu.close(); root.open-feedback-folder(); } }
             ActionButton { x: 7px; y: 140px; width: 202px; height: 40px; label: root.smart-enabled ? "智能预选：开" : "智能预选：关"; quiet: true; enabled: !root.busy && !root.text-composing; clicked => { helpMenu.close(); root.toggle-smart(); } }
             ActionButton { x: 7px; y: 184px; width: 202px; height: 40px; label: "关于图片反馈"; quiet: true; clicked => { helpMenu.close(); about.show(); } }
         }
@@ -502,9 +492,7 @@ export component AppWindow inherits Window {
             x: 24px; y: 14px; width: parent.width - 48px; height: 36px; spacing: 12px;
             fileButtons := HorizontalLayout {
                 spacing: 8px; horizontal-stretch: 0;
-                ActionButton { min-width: 108px; label: "新建项目"; icon: @image-url("../assets/icons/new.svg"); font-size: 13px; shortcut: root.native-chrome ? "⌘N" : "Ctrl+N"; enabled: !root.busy && !root.text-composing; clicked => { root.new-project(); } }
                 ActionButton { min-width: 108px; label: "导入图片"; icon: @image-url("../assets/icons/image.svg"); font-size: 13px; shortcut: root.native-chrome ? "⌘O" : "Ctrl+O"; enabled: !root.busy && !root.text-composing; clicked => { root.import-image(); } }
-                ActionButton { min-width: 108px; label: "打开项目"; icon: @image-url("../assets/icons/open.svg"); font-size: 13px; enabled: !root.busy && !root.text-composing; clicked => { root.open-project(); } }
             }
             Rectangle { width: 1px; height: 24px; y: 6px; background: #e9ecf1; }
             historyButtons := HorizontalLayout {
@@ -512,9 +500,7 @@ export component AppWindow inherits Window {
                 ActionButton { width: 36px; label: "撤销"; icon: @image-url("../assets/icons/undo.svg"); icon-only: true; quiet: true; shortcut: root.native-chrome ? "⌘Z" : "Ctrl+Z"; enabled: root.can-undo && !root.busy && !root.text-composing; clicked => { root.undo(); } }
                 ActionButton { width: 36px; label: "重做"; icon: @image-url("../assets/icons/redo.svg"); icon-only: true; quiet: true; shortcut: root.native-chrome ? "⇧⌘Z" : "Ctrl+Shift+Z / Ctrl+Y"; enabled: root.can-redo && !root.busy && !root.text-composing; clicked => { root.redo(); } }
             }
-            Text { min-width: 0px; horizontal-stretch: 1; text: root.dirty ? "未保存" : ""; color: #8791a1; font-size: 11px; vertical-alignment: center; overflow: elide; }
-            saveProjectButton := ActionButton { min-width: 108px; label: "保存项目"; icon: @image-url("../assets/icons/save.svg"); shortcut: root.native-chrome ? "⌘S" : "Ctrl+S"; enabled: root.loaded && !root.busy && !root.text-composing; clicked => { root.save-project(); } }
-            exportPackageButton := ActionButton { min-width: 124px; label: "导出反馈包"; icon: @image-url("../assets/icons/export.svg"); primary: true; enabled: root.loaded && !root.busy && !root.text-composing; clicked => { root.export-package(); } }
+            Rectangle { min-width: 0px; horizontal-stretch: 1; }
             if root.native-chrome : WindowButton { kind: 3; description: "更多菜单"; clicked => { helpMenu.show(); } }
         }
         Rectangle { x: 0px; y: 63px; width: parent.width; height: 1px; background: #e3e7ed; }
@@ -840,8 +826,8 @@ export component AppWindow inherits Window {
 
                 // Controls and their hit region stop click/scroll penetration to the canvas.
                 zoomControls := Rectangle {
-                    x: min(parent.width - self.width - 16px, parent.width * 0.6 + 42px);
-                    y: parent.height - self.height - 16px;
+                    x: parent.width - self.width - 48px;
+                    y: parent.height - self.height - 24px;
                     width: 76px; height: 38px;
                     visible: root.loaded;
                     border-radius: 9px;
@@ -1146,18 +1132,18 @@ export component AppWindow inherits Window {
                     height: 36px;
                     label: root.copy-complete ? "已复制" : "复制反馈说明";
                     icon: @image-url("../assets/icons/copy.svg");
-                    accessible-description: "复制本机原图路径和修改意见；跨设备需另附原图或反馈包。";
+                    accessible-description: "复制本机原图路径和修改意见；跨设备需另附原图。";
                     enabled: root.loaded && root.note-count > 0 && !root.busy && !root.text-composing;
                     clicked => { root.copy-feedback(); }
                 }
                 Rectangle { x: 0px; y: 0px; width: parent.width; height: 1px; background: #edf0f4; }
-                if (copyFeedback.hovered || copyFeedback.focused) && !root.confirm-visible : Rectangle {
+                if (copyFeedback.hovered || copyFeedback.focused) && !root.confirm-visible && !root.toast-visible : Rectangle {
                     x: 20px; y: -58px; width: 290px; height: 64px;
                     border-radius: 8px; border-width: 1px; border-color: #dfe3ed;
                     background: #ffffff;
                     Text {
                         x: 12px; y: 11px; width: parent.width - 24px; height: 42px;
-                        text: "复制原图路径和精简修改建议。\n跨设备请另附原图或反馈包。";
+                        text: "复制原图路径和精简修改建议。\n跨设备请另附原图。";
                         color: #687386; font-size: 12px; wrap: word-wrap;
                     }
                 }
@@ -1166,10 +1152,11 @@ export component AppWindow inherits Window {
     }
 
     // Non-modal, explicit copy acknowledgement; no permanent refresh timer.
-    if root.toast-visible : Rectangle {
-        x: (root.width - self.width) / 2;
-        y: root.height - 142px;
-        width: min(440px, root.width - 40px);
+    toast := Rectangle {
+        visible: root.toast-visible;
+        x: copyFeedback.absolute-position.x;
+        y: copyFeedback.absolute-position.y - self.height - 12px;
+        width: copyFeedback.width;
         height: 88px;
         border-radius: 11px;
         border-width: 1px;
@@ -1204,18 +1191,13 @@ export component AppWindow inherits Window {
             x: 0px; y: 0px; width: parent.width; height: parent.height;
             enabled: root.confirm-visible;
             capture-key-pressed(event) => {
-                if root.confirm-saving { return accept; }
                 if event.text == Key.Escape { root.confirm-response(0); return accept; }
                 if event.text == Key.Return {
-                    root.confirm-response(root.confirm-choice == 0 && root.confirm-show-cancel ? 0 : (root.confirm-choice == 1 && root.confirm-show-discard ? 1 : 2));
+                    root.confirm-response(root.confirm-choice == 0 && root.confirm-show-cancel ? 0 : 2);
                     return accept;
                 }
                 if event.text == Key.Tab || event.text == Key.Backtab || event.text == Key.LeftArrow || event.text == Key.RightArrow {
-                    if event.text == Key.LeftArrow || event.text == Key.Backtab || (event.text == Key.Tab && event.modifiers.shift) {
-                        root.confirm-choice = root.confirm-choice == 2 ? (root.confirm-show-discard ? 1 : (root.confirm-show-cancel ? 0 : 2)) : (root.confirm-choice == 1 && root.confirm-show-cancel ? 0 : 2);
-                    } else {
-                        root.confirm-choice = root.confirm-choice == 0 ? (root.confirm-show-discard ? 1 : 2) : (root.confirm-choice == 1 ? 2 : (root.confirm-show-cancel ? 0 : (root.confirm-show-discard ? 1 : 2)));
-                    }
+                    root.confirm-choice = root.confirm-show-cancel && root.confirm-choice == 2 ? 0 : 2;
                     return accept;
                 }
                 // Do not leak Delete, Space, letters, or modified shortcuts to the canvas.
@@ -1226,27 +1208,26 @@ export component AppWindow inherits Window {
                 x: (parent.width - self.width) / 2;
                 y: (parent.height - self.height) / 2;
                 width: 520px;
-                height: (root.confirm-name == "" ? 292px : 326px) + (root.confirm-error == "" ? 0px : 66px);
+                height: root.confirm-name == "" ? 292px : 326px;
                 background: transparent;
                 Rectangle { x: -2px; y: 9px; width: parent.width + 4px; height: parent.height + 4px; border-radius: 19px; background: #101b3b15; }
                 Rectangle { x: 0px; y: 0px; width: parent.width; height: parent.height; border-radius: 17px; border-width: 1px; border-color: #e3e6f0; background: #ffffff; }
                 accessible-role: groupbox;
                 accessible-label: root.confirm-title;
 
-                // Original save/feedback symbol, built from vectors rather than font glyphs.
+                // Confirmation and notice symbols, built from vectors rather than font glyphs.
                 Rectangle {
                     x: 28px; y: 28px; width: 52px; height: 52px;
                     border-radius: 15px; background: root.confirm-destructive ? #fff0f2 : #eff0ff;
                     if root.confirm-destructive : Path { x: 13px; y: 13px; width: 26px; height: 25px; commands: "M 13 1 L 25 23 H 1 Z M 13 8 V 15 M 13 19 V 20"; stroke: #d45a6a; stroke-width: 1.8px; fill: transparent; }
-                    if !root.confirm-destructive && root.confirm-show-discard : Path { x: 14px; y: 12px; width: 25px; height: 28px; commands: "M 2 1 H 19 L 25 7 V 27 H 2 Z M 8 1 V 10 H 19 V 1 M 8 18 H 19 V 27 H 8 Z"; stroke: #5b62d5; stroke-width: 1.7px; fill: transparent; }
-                    if !root.confirm-destructive && !root.confirm-show-discard : Rectangle {
+                    if !root.confirm-destructive : Rectangle {
                         x: 14px; y: 14px; width: 24px; height: 24px; border-radius: 12px; border-width: 1.7px; border-color: #5b62d5; background: transparent;
                         Rectangle { x: 10px; y: 6px; width: 3px; height: 3px; border-radius: 1.5px; background: #5b62d5; }
                         Rectangle { x: 10.5px; y: 11px; width: 2px; height: 7px; border-radius: 1px; background: #5b62d5; }
                     }
                     Rectangle { x: 38px; y: 3px; width: 10px; height: 10px; border-radius: 5px; border-width: 2px; border-color: #ffffff; background: #ff8074; }
                 }
-                Text { x: 97px; y: 30px; width: 352px; height: 30px; text: root.confirm-title == "" ? "保存本次修改？" : root.confirm-title; color: #2a354b; font-size: 20px; font-weight: 600; overflow: elide; }
+                Text { x: 97px; y: 30px; width: 352px; height: 30px; text: root.confirm-title == "" ? "确认操作？" : root.confirm-title; color: #2a354b; font-size: 20px; font-weight: 600; overflow: elide; }
                 ScrollView {
                     x: 97px; y: 67px; width: 365px; height: root.confirm-name == "" ? 91px : 42px;
                     content-width: self.width - 14px;
@@ -1256,11 +1237,10 @@ export component AppWindow inherits Window {
                 }
                 Rectangle {
                     x: parent.width - 45px; y: 16px; width: 29px; height: 29px;
-                    border-radius: 8px; background: confirmCloseHit.has-hover && !root.confirm-saving ? #f1f3f8 : transparent;
-                    opacity: root.confirm-saving ? 0.35 : 1;
+                    border-radius: 8px; background: confirmCloseHit.has-hover ? #f1f3f8 : transparent;
                     Path { x: 10px; y: 10px; width: 9px; height: 9px; commands: "M 0 0 L 9 9 M 9 0 L 0 9"; stroke: #8c95a7; stroke-width: 1.5px; fill: transparent; }
                     confirmCloseHit := TouchArea {
-                        enabled: root.confirm-visible && !root.confirm-saving;
+                        enabled: root.confirm-visible;
                         clicked => { confirmKeys.focus(); root.confirm-response(0); }
                     }
                 }
@@ -1269,53 +1249,32 @@ export component AppWindow inherits Window {
                     visible: root.confirm-name != "";
                     border-radius: 10px; border-width: 1px; border-color: #e9ebf3; background: #f7f8fc;
                     Path { x: 17px; y: 18px; width: 21px; height: 27px; commands: "M 2 1 H 14 L 21 8 V 26 H 2 Z M 14 1 V 8 H 21 M 7 14 H 16 M 7 19 H 16"; stroke: #959eb2; stroke-width: 1.3px; fill: transparent; }
-                    Text { x: 54px; y: 12px; width: parent.width - 71px; height: 22px; text: root.confirm-name == "" ? "未命名反馈项目" : root.confirm-name; color: #4b5770; font-size: 13px; font-weight: 500; overflow: elide; }
-                    Text { x: 54px; y: 36px; width: parent.width - 71px; height: 17px; text: root.confirm-saving ? "正在处理，请稍候。" : (root.confirm-show-discard ? "图片与批注保存在同一个项目中" : "当前操作对象"); color: #99a2b4; font-size: 10px; }
+                    Text { x: 54px; y: 12px; width: parent.width - 71px; height: 22px; text: root.confirm-name == "" ? "当前图片" : root.confirm-name; color: #4b5770; font-size: 13px; font-weight: 500; overflow: elide; }
+                    Text { x: 54px; y: 36px; width: parent.width - 71px; height: 17px; text: "当前操作对象"; color: #99a2b4; font-size: 10px; }
                 }
                 Text {
                     x: 29px; y: root.confirm-name == "" ? 170px : 204px; width: parent.width - 58px; height: 24px;
-                    visible: root.confirm-error == "" && (root.confirm-saving || root.confirm-footnote != "");
-                    text: root.confirm-saving ? "请保持窗口开启，直到处理完成。" : root.confirm-footnote;
+                    visible: root.confirm-footnote != "";
+                    text: root.confirm-footnote;
                     color: #929bab; font-size: 11px;
                 }
-                Rectangle {
-                    x: 28px; y: root.confirm-name == "" ? 168px : 202px; width: parent.width - 56px; height: 88px;
-                    visible: root.confirm-error != "";
-                    border-radius: 9px; border-width: 1px; border-color: #f0d5d8; background: #fff6f7;
-                    Text { x: 13px; y: 10px; width: parent.width - 26px; height: 19px; text: "操作未完成"; color: #b55765; font-size: 11px; font-weight: 600; }
-                    ScrollView {
-                        x: 11px; y: 32px; width: parent.width - 22px; height: 45px;
-                        content-width: self.width - 12px;
-                        VerticalLayout {
-                            Text { text: root.confirm-error; color: #9e6873; font-size: 11px; wrap: word-wrap; }
-                        }
-                    }
-                }
                 Rectangle { x: 28px; y: parent.height - 86px; width: parent.width - 56px; height: 1px; background: #eef0f5; }
-                Text { x: 29px; y: parent.height - 52px; width: 96px; height: 18px; text: root.confirm-saving ? "请稍候" : (root.confirm-show-cancel ? "Esc 取消" : "Enter 继续"); color: #a8afbd; font-size: 10px; }
+                Text { x: 29px; y: parent.height - 52px; width: 96px; height: 18px; text: root.confirm-show-cancel ? "Esc 取消" : "Enter 继续"; color: #a8afbd; font-size: 10px; }
                 confirmCancel := ActionButton {
-                    x: parent.width - (root.confirm-show-discard ? 386px : 276px); y: parent.height - 66px; width: 84px; height: 40px;
+                    x: parent.width - 276px; y: parent.height - 66px; width: 84px; height: 40px;
                     label: root.confirm-cancel-label;
                     visible: root.confirm-show-cancel;
-                    enabled: root.confirm-visible && root.confirm-show-cancel && !root.confirm-saving;
-                    focus-ring: confirmKeys.has-focus && root.confirm-choice == 0 && !root.confirm-saving;
+                    enabled: root.confirm-visible && root.confirm-show-cancel;
+                    focus-ring: confirmKeys.has-focus && root.confirm-choice == 0;
                     clicked => { root.confirm-choice = 0; confirmKeys.focus(); root.confirm-response(0); }
                 }
-                confirmDiscard := ActionButton {
-                    x: parent.width - 292px; y: parent.height - 66px; width: 100px; height: 40px;
-                    label: root.confirm-discard-label; destructive: true;
-                    visible: root.confirm-show-discard;
-                    enabled: root.confirm-visible && root.confirm-show-discard && !root.confirm-saving;
-                    focus-ring: confirmKeys.has-focus && root.confirm-choice == 1 && !root.confirm-saving;
-                    clicked => { root.confirm-choice = 1; confirmKeys.focus(); root.confirm-response(1); }
-                }
-                confirmSave := ActionButton {
+                confirmPrimary := ActionButton {
                     x: parent.width - 182px; y: parent.height - 66px; width: 154px; height: 40px;
-                    label: root.confirm-saving ? "正在保存" : root.confirm-save-label;
+                    label: root.confirm-primary-label;
                     primary: true;
                     destructive: root.confirm-destructive;
-                    enabled: root.confirm-visible && !root.confirm-saving;
-                    focus-ring: confirmKeys.has-focus && root.confirm-choice == 2 && !root.confirm-saving;
+                    enabled: root.confirm-visible;
+                    focus-ring: confirmKeys.has-focus && root.confirm-choice == 2;
                     clicked => { root.confirm-choice = 2; confirmKeys.focus(); root.confirm-response(2); }
                 }
             }

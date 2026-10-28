@@ -8,28 +8,28 @@ pub(super) fn prepare(
     cached: Option<DeliveryCache>,
 ) -> Result<DeliveryCache, String> {
     let source = delivery::verified_source_path(asset);
-    let package = match cached {
-        Some(cache) if cache.snapshot == doc && cache.package.is_complete() => cache.package,
+    let prepared = match cached {
+        Some(cache) if cache.snapshot == doc && cache.prepared.is_complete() => cache.prepared,
         _ => delivery::prepare(root, &doc, asset)?,
     };
     Ok(DeliveryCache {
         snapshot: doc,
-        package,
+        prepared,
         source,
     })
 }
 fn text(cache: &DeliveryCache, request: CopyRequest) -> Result<String, String> {
     match request {
         CopyRequest::Feedback => Ok(cache
-            .package
+            .prepared
             .clipboard_text_with_source(&cache.snapshot, cache.source.as_deref())),
         CopyRequest::OriginalPath => Ok(cache
             .source
             .as_deref()
-            .unwrap_or(&cache.package.original)
+            .unwrap_or(&cache.prepared.original)
             .display()
             .to_string()),
-        CopyRequest::Base64 => cache.package.embedded_text(&cache.snapshot),
+        CopyRequest::Base64 => cache.prepared.embedded_text(&cache.snapshot),
     }
 }
 pub(super) fn begin(
@@ -59,7 +59,7 @@ pub(super) fn begin(
         if let Some(cache) = e
             .delivery
             .as_ref()
-            .filter(|cache| cache.snapshot == doc && cache.package.is_complete())
+            .filter(|cache| cache.snapshot == doc && cache.prepared.is_complete())
             .cloned()
         {
             let payload = text(&cache, request);
@@ -73,7 +73,7 @@ pub(super) fn begin(
         .clone()
         .unwrap_or_else(|| app_dir().join("feedback-deliveries"));
     let previous = e.delivery.clone();
-    set_status(ui, "正在保存原图、编号参考图与反馈包…");
+    set_status(ui, "正在准备原图快照…");
     start_work(ui, e, worker_timer, move || {
         let result = prepare(&root, doc, &asset, previous).map(|cache| {
             let payload = text(&cache, request);
@@ -123,7 +123,7 @@ pub(super) fn open_folder(ui: &AppWindow, e: &mut Editor) {
     let Some(folder) = e
         .delivery
         .as_ref()
-        .map(|cache| cache.package.folder.clone())
+        .map(|cache| cache.prepared.folder.clone())
     else {
         return;
     };
@@ -148,6 +148,6 @@ pub(super) fn open_folder(ui: &AppWindow, e: &mut Editor) {
         Ok(())
     })();
     if let Err(error) = result {
-        show_message(ui, e, "无法打开反馈包目录", error);
+        show_message(ui, e, "无法打开图片快照目录", error);
     }
 }

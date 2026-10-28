@@ -1,24 +1,21 @@
-//! Bounded local files, portable projects and feedback export. No network or host IDs.
+//! Bounded local images and durable snapshots. No network or host IDs.
 use crate::document::{AnnotationKind, Document, Rect};
 use image::{ImageEncoder, Rgba, RgbaImage};
-use serde::Serialize;
 use std::fs::{self, File};
-use std::io::{Cursor, Read, Write};
+use std::io::{Cursor, Read};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
-use zip::{ZipArchive, ZipWriter, write::SimpleFileOptions};
 
 pub const MAX_FILE_BYTES: u64 = 64 * 1024 * 1024;
 pub const MAX_PIXELS: u64 = 40_000_000;
-const MAX_JSON: u64 = 4 * 1024 * 1024;
 
 pub struct Asset {
     pub pixels: RgbaImage,
     pub original: Vec<u8>,
     pub extension: String,
     pub name: String,
-    /// Disk origin is session-only metadata, never serialized into a portable project.
+    /// Disk origin is session-only metadata.
     pub source_path: Option<PathBuf>,
 }
 
@@ -128,137 +125,19 @@ fn unique_suffix_at(now: SystemTime) -> String {
     )
 }
 
-/// Sibling temporary file followed by atomic replacement; never delete a good saved project first.
-fn atomic_file(path: &Path, bytes: &[u8]) -> Result<(), String> {
-    let parent = path
-        .parent()
-        .filter(|p| !p.as_os_str().is_empty())
-        .unwrap_or(Path::new("."));
-    let temp = parent.join(format!(".image-feedback-{}.tmp", unique_suffix()));
-    let result = (|| {
-        let mut file = File::options()
-            .write(true)
-            .create_new(true)
-            .open(&temp)
-            .map_err(|e| e.to_string())?;
-        file.write_all(bytes)
-            .and_then(|_| file.sync_all())
-            .map_err(|e| e.to_string())?;
-        drop(file);
-        #[cfg(windows)]
-        {
-            use std::os::windows::ffi::OsStrExt;
-            #[link(name = "kernel32")]
-            unsafe extern "system" {
-                fn MoveFileExW(existing: *const u16, new: *const u16, flags: u32) -> i32;
-            }
-            let from: Vec<u16> = temp.as_os_str().encode_wide().chain(Some(0)).collect();
-            let to: Vec<u16> = path.as_os_str().encode_wide().chain(Some(0)).collect();
-            // MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH
-            if unsafe { MoveFileExW(from.as_ptr(), to.as_ptr(), 0x1 | 0x8) } == 0 {
-                return Err(std::io::Error::last_os_error().to_string());
-            }
-        }
-        #[cfg(not(windows))]
-        fs::rename(&temp, path).map_err(|e| e.to_string())?;
-        Ok(())
-    })();
-    if result.is_err() && temp.exists() {
-        let _ = fs::remove_file(&temp);
-    }
-    result
-}
-
-pub fn save_project(path: &Path, doc: &Document, asset: &Asset) -> Result<(), String> {
-    doc.validate()?;
-    verify_asset(doc, asset)?;
-    let json = serde_json::to_vec_pretty(doc).map_err(|e| e.to_string())?;
-    if json.len() as u64 > MAX_JSON {
-        return Err("项目数据超过 4 MiB 上限，请减少批注文本后保存".into());
-    }
-    if asset.original.len() as u64 > MAX_FILE_BYTES {
-        return Err("原图文件超过 64 MiB 上限".into());
-    }
-    let mut cursor = Cursor::new(Vec::new());
-    {
-        let mut zip = ZipWriter::new(&mut cursor);
-        zip.start_file(
-            "project.json",
-            SimpleFileOptions::default().compression_method(zip::CompressionMethod::Deflated),
-        )
-        .map_err(|e| e.to_string())?;
-        zip.write_all(&json).map_err(|e| e.to_string())?;
-        zip.start_file(
-            "original.bin",
-            SimpleFileOptions::default().compression_method(zip::CompressionMethod::Stored),
-        )
-        .map_err(|e| e.to_string())?;
-        zip.write_all(&asset.original).map_err(|e| e.to_string())?;
-        zip.finish().map_err(|e| e.to_string())?;
-    }
-    atomic_file(path, &cursor.into_inner())
-}
-
-fn read_entry(archive: &mut ZipArchive<File>, name: &str, max: u64) -> Result<Vec<u8>, String> {
-    let entry = archive
-        .by_name(name)
-        .map_err(|_| format!("项目缺少 {name}"))?;
-    if entry.size() > max {
-        return Err(format!("项目条目过大：{name}"));
-    }
-    let mut result = Vec::new();
-    entry
-        .take(max + 1)
-        .read_to_end(&mut result)
-        .map_err(|e| e.to_string())?;
-    if result.len() as u64 > max {
-        return Err(format!("项目条目过大：{name}"));
-    }
-    Ok(result)
-}
-
-pub fn open_project(path: &Path) -> Result<(Document, Asset), String> {
-    if fs::metadata(path).map_err(|e| e.to_string())?.len() > MAX_FILE_BYTES + MAX_JSON {
-        return Err("项目文件超过安全上限".into());
-    }
-    let mut archive = ZipArchive::new(File::open(path).map_err(|e| e.to_string())?)
-        .map_err(|e| format!("无效的项目文件：{e}"))?;
-    // Read exactly two known entries; never extract arbitrary archive paths onto the filesystem.
-    if archive.len() != 2 {
-        return Err("项目应恰好包含 project.json 与 original.bin".into());
-    }
-    let json = read_entry(&mut archive, "project.json", MAX_JSON)?;
-    let doc: Document = serde_json::from_slice(&json).map_err(|e| format!("项目数据无效：{e}"))?;
-    doc.validate()?;
-    let bytes = read_entry(&mut archive, "original.bin", MAX_FILE_BYTES)?;
-    let asset = Asset::from_bytes(bytes, doc.image.file_name.clone())?;
-    verify_asset(&doc, &asset)?;
-    Ok((doc, asset))
-}
-
 fn verify_asset(doc: &Document, asset: &Asset) -> Result<(), String> {
     if !["png", "jpg", "webp", "bmp"].contains(&asset.extension.as_str()) {
         return Err("无效的原图扩展名".into());
     }
     if (doc.image.width, doc.image.height) != (asset.pixels.width(), asset.pixels.height()) {
-        return Err("项目图片尺寸与原图不一致".into());
+        return Err("批注图片尺寸与原图不一致".into());
     }
     Ok(())
 }
 
-#[derive(Serialize)]
-struct Feedback<'a> {
-    schema: &'static str,
-    coordinate_space: &'static str,
-    original: String,
-    reference: &'static str,
-    original_pixels_unchanged: bool,
-    document: &'a Document,
-}
-
 pub fn feedback_text(doc: &Document) -> String {
     let mut text = format!(
-        "# 图片修改意见\n\n图片：{}（{} × {} 像素）\n坐标以原图像素为准；原图保持不变。请结合 original 与 reference.png 阅读。\n\n",
+        "# 图片修改意见\n\n图片：{}（{} × {} 像素）\n坐标以原图像素为准；原图保持不变。\n\n",
         doc.image.file_name, doc.image.width, doc.image.height
     );
     for (index, note) in doc.annotations.iter().enumerate() {
@@ -440,36 +319,20 @@ pub fn render_reference(doc: &Document, asset: &Asset) -> Result<RgbaImage, Stri
     Ok(result)
 }
 
-/// Always create a unique new directory; never silently overwrite someone else's feedback.
-pub fn export_package(parent: &Path, doc: &Document, asset: &Asset) -> Result<PathBuf, String> {
+/// Create only the durable images needed for copying; never overwrite an earlier snapshot.
+pub fn prepare_snapshot(parent: &Path, doc: &Document, asset: &Asset) -> Result<PathBuf, String> {
     doc.validate()?;
     verify_asset(doc, asset)?;
     let folder = parent.join(format!("image-feedback-{}", unique_suffix()));
-    fs::create_dir(&folder).map_err(|e| format!("无法创建导出目录：{e}"))?;
-    let result = (|| {
-        let original = format!("original.{}", asset.extension);
-        fs::write(folder.join(&original), &asset.original).map_err(|e| e.to_string())?;
-        let reference = render_reference(doc, asset)?;
-        fs::write(folder.join("reference.png"), png_bytes(&reference)?)
-            .map_err(|e| e.to_string())?;
-        fs::write(folder.join("feedback.md"), feedback_text(doc)).map_err(|e| e.to_string())?;
-        let feedback = Feedback {
-            schema: "image-feedback-package-1",
-            coordinate_space: "original-image-pixels",
-            original,
-            reference: "reference.png",
-            original_pixels_unchanged: true,
-            document: doc,
-        };
-        fs::write(
-            folder.join("feedback.json"),
-            serde_json::to_vec_pretty(&feedback).map_err(|e| e.to_string())?,
-        )
-        .map_err(|e| e.to_string())?;
-        Ok(folder.clone())
-    })();
-    // On error preserve the partial directory for diagnosis; do not falsely report a complete export.
-    result
+    fs::create_dir(&folder).map_err(|e| format!("无法创建图片快照目录：{e}"))?;
+    fs::write(
+        folder.join(format!("original.{}", asset.extension)),
+        &asset.original,
+    )
+    .map_err(|e| e.to_string())?;
+    let reference = render_reference(doc, asset)?;
+    fs::write(folder.join("reference.png"), png_bytes(&reference)?).map_err(|e| e.to_string())?;
+    Ok(folder)
 }
 
 #[cfg(test)]
@@ -508,31 +371,6 @@ mod tests {
         p
     }
     #[test]
-    fn original_bytes_survive_project_roundtrip() {
-        let a = asset();
-        let mut d = Document::new("测试.png", 80, 60).unwrap();
-        d.add_point(Point { x: 20., y: 20. }).unwrap();
-        let dir = temp();
-        let path = dir.join("中文.ifp");
-        save_project(&path, &d, &a).unwrap();
-        let (restored, im) = open_project(&path).unwrap();
-        assert_eq!(d, restored);
-        assert_eq!(a.original, im.original);
-        fs::remove_dir_all(dir).unwrap();
-    }
-    #[test]
-    fn save_replaces_existing_file_atomically() {
-        let a = asset();
-        let mut d = Document::new("x.png", 80, 60).unwrap();
-        let dir = temp();
-        let path = dir.join("x.ifp");
-        save_project(&path, &d, &a).unwrap();
-        d.add_global().unwrap();
-        save_project(&path, &d, &a).unwrap();
-        assert_eq!(open_project(&path).unwrap().0, d);
-        fs::remove_dir_all(dir).unwrap();
-    }
-    #[test]
     fn rejects_mismatched_dimensions() {
         let a = asset();
         let d = Document::new("x.png", 81, 60).unwrap();
@@ -557,59 +395,25 @@ mod tests {
         assert_ne!(r, before);
     }
     #[test]
-    fn exports_four_portable_files_with_matching_numbering() {
+    fn snapshots_keep_only_images_and_never_overwrite_previous_results() {
         let a = asset();
         let mut d = Document::new("x.png", 80, 60).unwrap();
         let id = d.add_point(Point { x: 40., y: 40. }).unwrap();
         d.set_text(id, "移动按钮".into()).unwrap();
         let dir = temp();
-        let output = export_package(&dir, &d, &a).unwrap();
-        assert_eq!(fs::read_dir(&output).unwrap().count(), 4);
-        let text = fs::read_to_string(output.join("feedback.md")).unwrap();
-        assert!(text.contains("1. 点位置"));
-        assert!(text.contains("移动按钮"));
-        let json: serde_json::Value =
-            serde_json::from_slice(&fs::read(output.join("feedback.json")).unwrap()).unwrap();
-        assert_eq!(json["original_pixels_unchanged"], true);
-        assert_eq!(fs::read(output.join("original.png")).unwrap(), a.original);
-        fs::remove_dir_all(dir).unwrap();
-    }
-    #[test]
-    fn export_does_not_overwrite_previous_package() {
-        let a = asset();
-        let d = Document::new("x.png", 80, 60).unwrap();
-        let dir = temp();
-        assert_ne!(
-            export_package(&dir, &d, &a).unwrap(),
-            export_package(&dir, &d, &a).unwrap()
-        );
+        let first = prepare_snapshot(&dir, &d, &a).unwrap();
+        let second = prepare_snapshot(&dir, &d, &a).unwrap();
+        assert_ne!(first, second);
+        assert_eq!(fs::read_dir(&first).unwrap().count(), 2);
+        assert_eq!(fs::read(first.join("original.png")).unwrap(), a.original);
+        assert!(first.join("reference.png").is_file());
+        assert!(!first.join("feedback-package.zip").exists());
+        assert!(!first.join("feedback.json").exists());
         fs::remove_dir_all(dir).unwrap();
     }
     #[test]
     fn rejects_invalid_image() {
         assert!(Asset::from_bytes(b"not an image".to_vec(), "x.png".into()).is_err());
-    }
-    #[test]
-    fn oversized_project_cannot_replace_a_good_save() {
-        let a = asset();
-        let mut d = Document::new("x.png", 80, 60).unwrap();
-        let dir = temp();
-        let path = dir.join("x.ifp");
-        save_project(&path, &d, &a).unwrap();
-        let before = fs::read(&path).unwrap();
-        for id in 1..=80 {
-            d.annotations.push(crate::document::Annotation {
-                id,
-                text: "字".repeat(20_000),
-                kind: AnnotationKind::Global,
-            });
-        }
-        d.next_id = 81;
-        d.validate().unwrap();
-        assert!(save_project(&path, &d, &a).is_err());
-        assert_eq!(fs::read(&path).unwrap(), before);
-        assert!(open_project(&path).is_ok());
-        fs::remove_dir_all(dir).unwrap();
     }
     #[test]
     fn fractional_source_clearing_uses_the_same_columns_as_copying() {
@@ -633,12 +437,12 @@ mod tests {
         assert_eq!(*r.get_pixel(149, 55), Rgba([30, 80, 140, 255]));
     }
     #[test]
-    fn untrusted_export_extension_is_rejected() {
+    fn untrusted_snapshot_extension_is_rejected() {
         let mut a = asset();
         a.extension = "../../other".into();
         let d = Document::new("x.png", 80, 60).unwrap();
         let dir = temp();
-        assert!(export_package(&dir, &d, &a).is_err());
+        assert!(prepare_snapshot(&dir, &d, &a).is_err());
         assert_eq!(fs::read_dir(&dir).unwrap().count(), 0);
         fs::remove_dir_all(dir).unwrap();
     }

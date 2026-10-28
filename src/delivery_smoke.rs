@@ -44,7 +44,7 @@ pub(super) fn start(
         let thumb = preview(&asset);
         {
             let mut e = state.borrow_mut();
-            install(ui, &mut e, doc, asset, None, thumb);
+            install(ui, &mut e, doc, asset, thumb);
             e.delivery_root = Some(folder.join("prepared"));
         }
         for index in 0..14 {
@@ -155,7 +155,7 @@ fn poll(
                     );
                     require(
                         state.borrow().worker.is_some(),
-                        "uncached copy did not prepare a durable package asynchronously",
+                        "uncached copy did not prepare a durable snapshot asynchronously",
                     )?;
                 }
                 1 => {
@@ -165,15 +165,28 @@ fn poll(
                         .clone()
                         .ok_or("feedback was not copied")?;
                     let e = state.borrow();
-                    let cache = e.delivery.as_ref().ok_or("prepared package missing")?;
+                    let cache = e.delivery.as_ref().ok_or("prepared snapshot missing")?;
                     require(
-                        cache.package.is_complete(),
+                        cache.prepared.is_complete(),
                         "copied image paths are not durable files",
                     )?;
                     require(
-                        text.starts_with(&format!("原图：{}\n", cache.package.original.display()))
+                        std::fs::read_dir(&cache.prepared.folder)
+                            .map_err(|e| e.to_string())?
+                            .count()
+                            == 2
+                            && !cache.prepared.folder.join("feedback-package.zip").exists(),
+                        "copy unexpectedly created an export package",
+                    )?;
+                    require(
+                        (ui.get_toast_right() - ui.get_copy_button_right()).abs() < 1.
+                            && ui.get_toast_bottom() < ui.get_copy_button_top(),
+                        "copy toast is not aligned above the feedback button",
+                    )?;
+                    require(
+                        text.starts_with(&format!("原图：{}\n", cache.prepared.original.display()))
                             && text
-                                .matches(cache.package.original.to_str().unwrap())
+                                .matches(cache.prepared.original.to_str().unwrap())
                                 .count()
                                 == 1,
                         "compact clipboard must contain exactly one original path",
@@ -193,7 +206,7 @@ fn poll(
                         "clipboard contains delivery boilerplate or omitted newest feedback",
                     )?;
                     require(
-                        std::fs::read(&cache.package.original).map_err(|e| e.to_string())?
+                        std::fs::read(&cache.prepared.original).map_err(|e| e.to_string())?
                             == e.asset.as_ref().unwrap().original,
                         "pasted original bytes changed",
                     )?;
@@ -241,14 +254,14 @@ fn poll(
                     let e = state.borrow();
                     let cache = e.delivery.as_ref().unwrap();
                     require(
-                        e.clipboard_written.as_deref() == cache.package.original.to_str(),
+                        e.clipboard_written.as_deref() == cache.prepared.original.to_str(),
                         "pasted source path did not point to the saved PNG",
                     )?;
                     drop(e);
                     ui.invoke_open_feedback_folder();
                     require(
                         state.borrow().opened_delivery.is_some(),
-                        "package-folder action did not target the delivery",
+                        "snapshot-folder action did not target the delivery",
                     )?;
                     let source = std::path::absolute(folder.join("external-source.png"))
                         .map_err(|e| e.to_string())?;
@@ -261,7 +274,7 @@ fn poll(
                         asset.pixels.height(),
                     )?;
                     let thumb = preview(&asset);
-                    install(&ui, &mut state.borrow_mut(), doc, asset, None, thumb);
+                    install(&ui, &mut state.borrow_mut(), doc, asset, thumb);
                     ui.invoke_copy_original_path();
                 }
                 3 => {
@@ -279,16 +292,16 @@ fn poll(
                     let cache = e.delivery.as_ref().ok_or("disk snapshot missing")?;
                     require(
                         cache.source.is_none()
-                            && e.clipboard_written.as_deref() == cache.package.original.to_str(),
+                            && e.clipboard_written.as_deref() == cache.prepared.original.to_str(),
                         "changed source did not fall back to the matching immutable snapshot",
                     )?;
                     require(
-                        std::fs::read(&cache.package.original).map_err(|e| e.to_string())?
+                        std::fs::read(&cache.prepared.original).map_err(|e| e.to_string())?
                             == e.asset.as_ref().unwrap().original,
                         "source change corrupted the imported pixels",
                     )?;
                     drop(e);
-                    let report = serde_json::json!({"result":"passed","method":"real Slint window; scene pointer/keyboard dispatch, isolated clipboard sink, local fixture filesystem","checks":["new rectangle scrolls to note 15","latest input focused and receives text","floating zoom control does not draw annotations","uncached copy prepares original/reference/ZIP asynchronously","copied paths exist and original bytes are unchanged","clipboard only contains one original path and concise feedback","Base64 contains both image data and annotations","image path and reveal-folder actions","unchanged disk origin preferred","changed disk origin falls back to snapshot"]});
+                    let report = serde_json::json!({"result":"passed","method":"real Slint window; scene pointer/keyboard dispatch, isolated clipboard sink, local fixture filesystem","checks":["new rectangle scrolls to note 15","latest input focused and receives text","floating zoom control does not draw annotations","uncached copy prepares original/reference snapshots asynchronously","copied paths exist and original bytes are unchanged","clipboard only contains one original path and concise feedback","Base64 contains both image data and annotations","image path and snapshot-folder actions","unchanged disk origin preferred","changed disk origin falls back to snapshot"]});
                     std::fs::write(
                         folder.join("delivery-report.json"),
                         serde_json::to_vec_pretty(&report).unwrap(),

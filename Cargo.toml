@@ -19,7 +19,6 @@ base64 = "0.22"
 image = { version = "0.25", default-features = false, features = ["png", "jpeg", "webp", "bmp"] }
 rfd = "0.17"
 arboard = { version = "3.6", default-features = false, features = ["image-data"] }
-zip = { version = "4", default-features = false, features = ["deflate"] }
 tray-icon = "0.21"
 # Lifecycle hooks are checked against this exact delegate implementation.
 winit = "=0.30.13"

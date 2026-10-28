@@ -10,7 +10,7 @@ fn two_axis_pan_and_reset_only_change_the_view() {
     assert_eq!(e.view.scale, scale);
     assert!(e.can_reset_view(800., 600.));
     assert_eq!(e.doc(), Some(&original));
-    assert!(!e.dirty() && !e.history.as_ref().unwrap().can_undo());
+    assert!(!e.history.as_ref().unwrap().can_undo());
     e.pan_view(-35., 24.);
     assert!(!e.can_reset_view(800., 600.));
     e.view.scale *= 1.25;
@@ -108,7 +108,7 @@ fn toggling_an_unchanged_note_does_not_add_history() {
     assert!(!e.history.as_ref().unwrap().can_undo());
 }
 #[test]
-fn clear_feedback_keeps_image_project_and_view_and_undo_restores_all_edits() {
+fn clear_feedback_keeps_image_and_view_and_undo_restores_all_edits() {
     let mut e = editor();
     e.history
         .as_mut()
@@ -120,7 +120,6 @@ fn clear_feedback_keeps_image_project_and_view_and_undo_restores_all_edits() {
             Ok(())
         })
         .unwrap();
-    e.project = Some(PathBuf::from("current.ifp"));
     e.view.scale = 1.5;
     e.view.x = 42.;
     e.pending = Some((1, "尚未完成的批注草稿".into()));
@@ -130,9 +129,8 @@ fn clear_feedback_keeps_image_project_and_view_and_undo_restores_all_edits() {
     assert!(e.doc().unwrap().annotations.is_empty());
     assert_eq!(e.doc().unwrap().image, expected.image);
     assert_eq!(e.doc().unwrap().next_id, expected.next_id);
-    assert_eq!(e.project.as_deref(), Some(Path::new("current.ifp")));
     assert_eq!((e.view.scale, e.view.x), (1.5, 42.));
-    assert!(e.dirty());
+    assert!(!e.has_feedback());
     assert!(e.history.as_mut().unwrap().undo());
     assert_eq!(e.doc(), Some(&expected));
     assert!(e.history.as_mut().unwrap().redo());
@@ -150,45 +148,16 @@ fn failed_clear_keeps_the_invalid_draft_and_existing_edits() {
 }
 
 #[test]
-fn new_project_can_be_cancelled_without_losing_the_draft() {
-    let mut e = editor();
-    let original = e.doc().cloned();
-    e.pending = Some((1, "尚未保存的批注".into()));
-    assert_eq!(e.request_action(PendingAction::New), None);
-    assert_eq!(e.confirmation.as_ref().unwrap().action, PendingAction::New);
-    e.cancel_confirmation();
-    assert_eq!(e.doc(), original.as_ref());
-    assert_eq!(e.pending.as_ref().unwrap().1, "尚未保存的批注");
-}
-
-#[test]
-fn new_project_waits_for_a_successful_save_and_clears_document_state() {
-    let mut e = editor();
-    e.project = Some(PathBuf::from("previous.ifp"));
-    e.selected = Some(1);
-    e.pending = Some((1, "保存后新建".into()));
-    e.request_action(PendingAction::New);
-    assert!(e.start_confirmed_save());
-    e.save_problem("写入失败");
-    assert!(e.doc().is_some());
-    assert!(e.pending.is_some());
-    assert!(e.start_confirmed_save());
-    e.flush().unwrap();
-    let snapshot = e.doc().unwrap().clone();
-    assert_eq!(
-        e.saved_successfully(PathBuf::from("previous.ifp"), snapshot),
-        Some(PendingAction::New)
-    );
-    e.new_project();
-    assert!(e.doc().is_none());
-    assert!(e.project.is_none() && e.saved.is_none() && e.asset.is_none());
-    assert!(e.pending.is_none() && e.selected.is_none());
-    assert!(!e.dirty());
-}
-
-#[test]
 fn clean_action_does_not_prompt_or_modify_document() {
     let mut e = editor();
+    e.history
+        .as_mut()
+        .unwrap()
+        .apply(|doc| {
+            doc.annotations.clear();
+            Ok(())
+        })
+        .unwrap();
     let before = e.doc().cloned();
     assert_eq!(
         e.request_action(PendingAction::Demo { annotated: false }),
@@ -206,7 +175,7 @@ fn cancel_confirmation_preserves_uncommitted_draft() {
     assert_eq!(e.doc(), Some(&original));
     e.cancel_confirmation();
     assert!(e.confirmation.is_none());
-    assert!(e.dirty());
+    assert!(e.has_feedback());
     assert_eq!(e.pending.as_ref().unwrap().1, "尚未提交的文字");
 }
 #[test]
@@ -221,75 +190,12 @@ fn a_second_request_cannot_replace_the_confirmed_intent() {
     );
 }
 #[test]
-fn confirmed_save_cannot_be_cancelled_mid_write_and_resumes_once() {
-    let mut e = editor();
-    e.pending = Some((1, "draft".into()));
-    e.request_action(PendingAction::Close);
-    assert!(e.start_confirmed_save());
-    e.flush().unwrap();
-    e.cancel_confirmation();
-    assert!(e.confirmation.is_some());
-    assert!(e.discard_confirmation().is_none());
-    assert!(!e.start_confirmed_save());
-    let snapshot = e.doc().unwrap().clone();
-    assert_eq!(
-        e.saved_successfully(PathBuf::from("saved.ifp"), snapshot.clone()),
-        Some(PendingAction::Close)
-    );
-    assert!(!e.dirty());
-    assert!(e.confirmation.is_none());
-    assert_eq!(
-        e.saved_successfully(PathBuf::from("saved.ifp"), snapshot),
-        None
-    );
-}
-#[test]
-fn save_failure_and_file_picker_cancel_keep_the_action_and_data() {
-    let mut e = editor();
-    e.pending = Some((1, "draft".into()));
-    let original = e.doc().unwrap().clone();
-    e.request_action(PendingAction::Paste);
-    assert!(e.start_confirmed_save());
-    e.save_problem("cancelled path picker");
-    assert_eq!(
-        e.confirmation.as_ref().unwrap().action,
-        PendingAction::Paste
-    );
-    assert!(!e.confirmation.as_ref().unwrap().saving);
-    assert_eq!(e.doc(), Some(&original));
-    assert!(e.pending.is_some());
-    assert!(e.start_confirmed_save());
-    e.save_problem("disk full");
-    assert_eq!(e.confirmation.as_ref().unwrap().error, "disk full");
-    assert!(e.dirty());
-}
-#[test]
-fn stale_save_success_never_discards_newer_edits() {
-    let mut e = editor();
-    e.pending = Some((1, "first".into()));
-    e.request_action(PendingAction::Close);
-    e.start_confirmed_save();
-    e.flush().unwrap();
-    let old = e.doc().unwrap().clone();
-    e.history
-        .as_mut()
-        .unwrap()
-        .apply(|d| d.set_text(1, "newer edit".into()))
-        .unwrap();
-    assert_eq!(e.saved_successfully(PathBuf::from("saved.ifp"), old), None);
-    assert!(e.dirty());
-    assert_eq!(e.doc().unwrap().annotation(1).unwrap().text, "newer edit");
-    assert!(!e.confirmation.as_ref().unwrap().saving);
-    assert!(!e.confirmation.as_ref().unwrap().error.is_empty());
-}
-#[test]
 fn discard_confirmation_does_not_silently_commit_invalid_text() {
     let mut e = editor();
     e.pending = Some((1, "x".repeat(20_001)));
     let before = e.doc().unwrap().clone();
     let next = PendingAction::Load {
         path: PathBuf::from("next.png"),
-        project: false,
     };
     e.request_action(next.clone());
     assert_eq!(e.discard_confirmation(), Some(next));
@@ -345,8 +251,7 @@ fn editor() -> Editor {
     })
     .unwrap();
     Editor {
-        history: Some(History::new(d.clone())),
-        saved: Some(d),
+        history: Some(History::new(d)),
         ..Default::default()
     }
 }
@@ -356,7 +261,7 @@ fn rejected_text_remains_pending_and_dirty() {
     e.pending = Some((1, "字".repeat(20_001)));
     assert!(e.flush().is_err());
     assert_eq!(e.pending.as_ref().unwrap().1.chars().count(), 20_001);
-    assert!(e.dirty());
+    assert!(e.has_feedback());
     assert_eq!(e.doc().unwrap().annotation(1).unwrap().text, "");
 }
 #[test]
@@ -368,7 +273,7 @@ fn corrected_text_can_commit_after_rejection() {
     e.flush().unwrap();
     assert!(e.pending.is_none());
     assert_eq!(e.doc().unwrap().annotation(1).unwrap().text, "修正后的意见");
-    assert!(e.dirty());
+    assert!(e.has_feedback());
 }
 #[test]
 fn ui_tokens_do_not_truncate_large_stable_ids() {
