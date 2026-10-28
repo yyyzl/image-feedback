@@ -53,7 +53,7 @@ bash scripts/verify-macos.sh dist/macos/ImageFeedback-0.1.2-macos-universal-adho
 
 [平台模块](<../src/platform/macos.rs>)保留winit自己的AppKit delegate，只添加缺失的Quit/reopen方法；不替换delegate、不修改cargo registry。Quit转发到同一窗口关闭保护，文件选择等重入时保持窗口。固定winit版本，升级时必须复查该约定。
 
-菜单栏父进程为Accessory，编辑器为Regular；用户私有Unix socket仅接受固定激活命令，用来恢复最小化窗口。只有持有编辑器锁的进程可创建/清理端点，后台线程阻塞等待，不做周期业务轮询。
+菜单栏父进程为Accessory，编辑器为Regular；用户私有Unix socket仅接受固定激活命令，用来恢复最小化窗口。Windows 与 macOS 的托盘退出通过随机令牌认证的本机回环连接请求编辑器关闭；编辑器有批注时等待用户确认，取消则保留两进程。只有持有编辑器锁的进程可创建或清理通信端点，通道不发送图片或批注。后台等待不阻塞界面，确认关闭后才检查编辑器锁并退出托盘。
 
 ## 许可与CI
 
@@ -64,3 +64,5 @@ bash scripts/verify-macos.sh dist/macos/ImageFeedback-0.1.2-macos-universal-adho
 安装后的窗口回归包含 `smoke-test`、`delivery-smoke`、`dialog-smoke` 和 `ui-smoke`。新增 UI 场景检查批注收起／展开、失败草稿恢复、键盘编辑及 1000 条批注和最小窗口；行为与证据边界见 [UI 对齐说明](<UI-WEB-ALIGNMENT.md>)。
 
 窗口回归使用真实Slint窗口及场景事件、隔离剪贴板，不是操作系统鼠标/UIA E2E。场景开始前按加载、文件工作与分析状态等待就绪，附加等待上限30秒；超时保留状态和窗口截图，不跳过失败场景。macOS检查真实decoration配置，并调用AppKit `terminate:` 验证退出保护；不把Slint内容截图称为原生traffic-light截图。真实IME、触控板、多屏、Gatekeeper、干净Windows虚拟机及最低macOS版本仍需专项用户实机验收。
+
+Windows 可运行 `pwsh -File scripts/verify-tray-quit.ps1` 测试空闲退出、启动竞争、独立编辑器以及有批注时取消后再确认；CI 也对实际发行构建运行该脚本。脚本使用隔离数据目录、实际的托盘与编辑器进程；通过测试场景派发托盘菜单事件，并向测试窗口投递按键消息，不是鼠标点击自动化。失败时只结束它自己启动的测试进程。

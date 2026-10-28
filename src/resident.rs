@@ -1,8 +1,10 @@
 //! Event-driven tray process. This branch never creates a Slint window or loads user pictures.
 use std::{
     error::Error,
+    fs::File,
     path::PathBuf,
     process::{Child, Command},
+    time::{Duration, Instant},
 };
 use tray_icon::{
     Icon, MouseButton, MouseButtonState, TrayIcon, TrayIconBuilder, TrayIconEvent,
@@ -11,21 +13,47 @@ use tray_icon::{
 use winit::{
     application::ApplicationHandler,
     event::WindowEvent,
-    event_loop::{ActiveEventLoop, ControlFlow, EventLoop},
+    event_loop::{ActiveEventLoop, ControlFlow, EventLoop, EventLoopProxy},
     window::WindowId,
 };
 #[derive(Debug)]
 enum Event {
     Open,
     Menu(MenuId),
+    QuitResult(QuitResult),
+}
+#[derive(Debug)]
+enum QuitOutcome {
+    Closed(File),
+    Cancelled,
+    Busy,
+    Failed(String),
+}
+#[derive(Debug)]
+struct QuitResult {
+    outcome: QuitOutcome,
+    child: Option<Child>,
+}
+struct QuitSmoke {
+    folder: PathBuf,
+    expect_cancel: bool,
+    saw_cancel: bool,
+    open_editor: bool,
+    open_annotated: bool,
 }
 struct Resident {
     tray: Option<TrayIcon>,
     open: Option<MenuId>,
     quit: Option<MenuId>,
+    quit_item: Option<MenuItem>,
+    hint: Option<MenuItem>,
+    proxy: EventLoopProxy<Event>,
+    quitting: bool,
+    exit_lock: Option<File>,
     child: Option<Child>,
     open_initially: bool,
     smoke_output: Option<PathBuf>,
+    quit_smoke: Option<QuitSmoke>,
     error: Option<String>,
 }
 const TEMPLATE_ICON: bool = cfg!(target_os = "macos");
@@ -46,6 +74,9 @@ fn icon() -> Result<Icon, Box<dyn Error>> {
 }
 impl Resident {
     fn open(&mut self) {
+        if self.quitting {
+            return;
+        }
         #[cfg(target_os = "macos")]
         if super::platform::activate_editor() {
             return;
@@ -56,13 +87,151 @@ impl Resident {
                 return;
             }
         }
-        match std::env::current_exe().and_then(|exe| Command::new(exe).arg("--editor").spawn()) {
+        match std::env::current_exe().and_then(|exe| {
+            let mut command = Command::new(exe);
+            command.arg("--editor");
+            if self.quit_smoke.as_ref().is_some_and(|s| s.open_annotated) {
+                command.arg("--demo");
+            }
+            command.spawn()
+        }) {
             Ok(child) => self.child = Some(child),
             Err(e) => {
                 self.error = Some(e.to_string());
             }
         }
     }
+    fn quit(&mut self) {
+        if self.quitting {
+            return;
+        }
+        self.quitting = true;
+        if let Some(item) = self.quit_item.as_ref() {
+            item.set_enabled(false);
+        }
+        if let Some(hint) = self.hint.as_ref() {
+            hint.set_text("正在退出；如有批注，请在编辑器中确认");
+        }
+        let proxy = self.proxy.clone();
+        let directory = super::app_dir();
+        let child = self.child.take();
+        std::thread::spawn(move || {
+            let result = coordinate_quit(&directory, child);
+            let _ = proxy.send_event(Event::QuitResult(result));
+        });
+    }
+    fn quit_result(&mut self, event_loop: &ActiveEventLoop, result: QuitResult) {
+        let QuitResult { outcome, child } = result;
+        self.child = child;
+        let mut repeat = false;
+        if let Some(smoke) = self.quit_smoke.as_mut() {
+            let result = match &outcome {
+                QuitOutcome::Cancelled if smoke.expect_cancel && !smoke.saw_cancel => {
+                    smoke.saw_cancel = true;
+                    repeat = true;
+                    std::fs::write(smoke.folder.join("cancelled.txt"), "cancelled")
+                        .map_err(|e| e.to_string())
+                }
+                QuitOutcome::Closed(_) if smoke.expect_cancel == smoke.saw_cancel => {
+                    let report = serde_json::json!({
+                        "result": "passed",
+                        "platform": std::env::consts::OS,
+                        "cancel_preserved_resident": smoke.saw_cancel,
+                        "started_editor": smoke.open_editor,
+                        "annotated_demo": smoke.open_annotated,
+                        "method": "real resident and editor processes; the native tray menu event is dispatched by the smoke scenario"
+                    });
+                    serde_json::to_vec_pretty(&report)
+                        .map_err(|e| e.to_string())
+                        .and_then(|data| {
+                            std::fs::write(smoke.folder.join("quit-report.json"), data)
+                                .map_err(|e| e.to_string())
+                        })
+                }
+                other => Err(format!("unexpected quit result: {other:?}")),
+            };
+            if let Err(error) = result {
+                let _ = std::fs::write(smoke.folder.join("failed.txt"), &error);
+                self.error = Some(error);
+                self.tray.take();
+                event_loop.exit();
+                return;
+            }
+        }
+        match outcome {
+            QuitOutcome::Closed(lock) => {
+                self.exit_lock = Some(lock);
+                self.tray.take();
+                event_loop.exit();
+            }
+            other => {
+                self.quitting = false;
+                if let Some(item) = self.quit_item.as_ref() {
+                    item.set_enabled(true);
+                }
+                if let Some(hint) = self.hint.as_ref() {
+                    hint.set_text(match other {
+                        QuitOutcome::Cancelled => "已取消退出，编辑器和常驻入口仍保留",
+                        QuitOutcome::Busy => "请先完成编辑器中的操作，再退出",
+                        QuitOutcome::Failed(ref error) => {
+                            eprintln!("退出图片反馈失败：{error}");
+                            "退出未完成，请先关闭编辑器后重试"
+                        }
+                        QuitOutcome::Closed(_) => unreachable!(),
+                    });
+                }
+            }
+        }
+        if repeat {
+            if let Some(id) = self.quit.clone() {
+                let _ = self.proxy.send_event(Event::Menu(id));
+            }
+        }
+    }
+}
+
+fn coordinate_quit(directory: &std::path::Path, mut child: Option<Child>) -> QuitResult {
+    let mut deadline = Instant::now() + Duration::from_secs(5);
+    let mut closing = false;
+    let outcome = loop {
+        let child_running = match child.as_mut().map(Child::try_wait) {
+            Some(Ok(None)) => true,
+            Some(Ok(Some(_))) => {
+                child = None;
+                false
+            }
+            Some(Err(error)) => break QuitOutcome::Failed(error.to_string()),
+            None => false,
+        };
+        match super::quit_ipc::try_editor_lock(directory) {
+            Ok(Some(lock)) if !child_running => break QuitOutcome::Closed(lock),
+            Ok(Some(lock)) => {
+                // A just-spawned editor may not have acquired its lock yet. Do not
+                // hold the lock while waiting for it to start or finish exiting.
+                drop(lock);
+            }
+            Ok(None) if !closing => match super::quit_ipc::request(directory) {
+                Ok(super::quit_ipc::Decision::Cancelled) => break QuitOutcome::Cancelled,
+                Ok(super::quit_ipc::Decision::Busy) => break QuitOutcome::Busy,
+                Ok(super::quit_ipc::Decision::Closing) => {
+                    closing = true;
+                    deadline = Instant::now() + Duration::from_secs(10);
+                }
+                Err(_) => {}
+            },
+            Ok(None) => {}
+            Err(error) => break QuitOutcome::Failed(error),
+        }
+        if Instant::now() >= deadline {
+            break QuitOutcome::Failed(if closing {
+                "编辑器未能完成关闭".into()
+            } else {
+                "无法连接仍在运行的编辑器".into()
+            });
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    };
+    QuitResult { outcome, child }
 }
 impl ApplicationHandler<Event> for Resident {
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
@@ -73,10 +242,12 @@ impl ApplicationHandler<Event> for Resident {
             let menu = Menu::new();
             let open = MenuItem::new("打开图片反馈", true, None);
             let hint = MenuItem::new("关闭编辑器后，常驻入口仍保留", false, None);
-            let quit = MenuItem::new("退出常驻入口", true, None);
+            let quit = MenuItem::new("退出图片反馈", true, None);
             self.open = Some(open.id().clone());
             self.quit = Some(quit.id().clone());
             menu.append_items(&[&open, &hint, &PredefinedMenuItem::separator(), &quit])?;
+            self.hint = Some(hint);
+            self.quit_item = Some(quit);
             self.tray = Some(
                 TrayIconBuilder::new()
                     .with_tooltip("图片反馈 · 轻量常驻入口")
@@ -106,6 +277,24 @@ impl ApplicationHandler<Event> for Resident {
                 )?;
                 self.tray.take();
                 event_loop.exit();
+            } else if let Some(smoke) = self.quit_smoke.as_ref() {
+                std::fs::create_dir_all(&smoke.folder)?;
+                let open_editor = smoke.open_editor;
+                let open_annotated = smoke.open_annotated;
+                if open_editor {
+                    self.open();
+                }
+                let proxy = self.proxy.clone();
+                let id = self.quit.clone().unwrap();
+                if open_annotated {
+                    // The demo loads asynchronously; the test must not quit an empty editor.
+                    std::thread::spawn(move || {
+                        std::thread::sleep(Duration::from_secs(5));
+                        let _ = proxy.send_event(Event::Menu(id));
+                    });
+                } else {
+                    let _ = proxy.send_event(Event::Menu(id));
+                }
             } else if self.open_initially {
                 self.open();
             }
@@ -123,10 +312,10 @@ impl ApplicationHandler<Event> for Resident {
                 if self.open.as_ref() == Some(&id) {
                     self.open();
                 } else if self.quit.as_ref() == Some(&id) {
-                    self.tray.take();
-                    event_loop.exit();
+                    self.quit();
                 }
             }
+            Event::QuitResult(result) => self.quit_result(event_loop, result),
         }
     }
     fn window_event(&mut self, _: &ActiveEventLoop, _: WindowId, _: WindowEvent) {}
@@ -142,6 +331,26 @@ pub fn run(open_initially: bool) -> Result<(), Box<dyn Error>> {
                 .ok_or("--tray-smoke requires an output directory")
         })
         .transpose()?;
+    let quit_smoke = args
+        .iter()
+        .position(|a| a == "--tray-quit-smoke")
+        .map(|i| {
+            args.get(i + 1)
+                .map(|folder| QuitSmoke {
+                    folder: PathBuf::from(folder),
+                    expect_cancel: args.iter().any(|a| a == "--expect-quit-cancel"),
+                    saw_cancel: false,
+                    open_editor: args.iter().any(|a| {
+                        a == "--quit-smoke-open-editor" || a == "--quit-smoke-open-annotated"
+                    }),
+                    open_annotated: args.iter().any(|a| a == "--quit-smoke-open-annotated"),
+                })
+                .ok_or("--tray-quit-smoke requires an output directory")
+        })
+        .transpose()?;
+    if quit_smoke.is_some() && smoke_output.is_some() {
+        return Err("Choose one tray smoke scenario".into());
+    }
     std::fs::create_dir_all(super::app_dir())?;
     let lock = std::fs::File::options()
         .read(true)
@@ -150,7 +359,7 @@ pub fn run(open_initially: bool) -> Result<(), Box<dyn Error>> {
         .truncate(false)
         .open(super::app_dir().join("resident.lock"))?;
     if lock.try_lock().is_err() {
-        if smoke_output.is_some() {
+        if smoke_output.is_some() || quit_smoke.is_some() {
             return Err("A resident is already running; it was preserved".into());
         }
         #[cfg(target_os = "macos")]
@@ -204,13 +413,19 @@ pub fn run(open_initially: bool) -> Result<(), Box<dyn Error>> {
         tray: None,
         open: None,
         quit: None,
+        quit_item: None,
+        hint: None,
+        proxy: events.create_proxy(),
+        quitting: false,
+        exit_lock: None,
         child: None,
         open_initially,
         smoke_output,
+        quit_smoke,
         error: None,
     };
     events.run_app(&mut app)?;
-    // Child is not killed on tray exit: it may contain unsaved changes.
+    // The editor is never killed: exit only follows a clean close or explicit discard.
     if let Some(err) = app.error {
         return Err(err.into());
     }

@@ -683,6 +683,43 @@ fn start_ready(
             "Escape discarded modifications",
         )?;
 
+        let (reply, answer) = mpsc::channel();
+        request_resident_quit(ui, &mut state.borrow_mut(), timer, reply);
+        if !(ui.get_confirm_visible()
+            && ui.get_confirm_title() == "退出图片反馈？"
+            && ui.get_confirm_choice() == 0)
+        {
+            let editor = state.borrow();
+            return Err(format!(
+                "resident quit confirmation: visible={}, title={:?}, choice={}, composing={}, worker={}, existing_confirmation={}, message={}, feedback={}, reply={:?}",
+                ui.get_confirm_visible(),
+                ui.get_confirm_title(),
+                ui.get_confirm_choice(),
+                ui.get_text_composing(),
+                editor.worker.is_some(),
+                editor.confirmation.is_some(),
+                editor.message.is_some(),
+                editor.has_feedback(),
+                answer.try_recv(),
+            ));
+        }
+        save_window_snapshot(ui, &folder.join("resident-quit-confirmation.png"))?;
+        key(ui, slint::platform::Key::Escape.into());
+        require(
+            answer.try_recv() == Ok(quit_ipc::Decision::Cancelled)
+                && state.borrow().doc() == Some(&original)
+                && !ui.get_confirm_visible(),
+            "cancelling resident quit did not preserve the feedback",
+        )?;
+        ui.invoke_load_example();
+        let (reply, answer) = mpsc::channel();
+        request_resident_quit(ui, &mut state.borrow_mut(), timer, reply);
+        require(
+            answer.try_recv() == Ok(quit_ipc::Decision::Busy) && ui.get_confirm_visible(),
+            "resident quit interrupted an existing modal operation",
+        )?;
+        cancel(ui);
+
         state.borrow_mut().pending = Some((id, "字".repeat(20_001)));
         ui.invoke_load_example();
         require(
@@ -871,6 +908,7 @@ fn poll(
                 "method":"real Slint window with scene-dispatched pointer and key events; not OS input automation",
                 "checks":[
                     "close and image replacement require an explicit discard",
+                    "resident quit cancellation and busy modal preserve feedback",
                     "destructive confirmation defaults to cancel",
                     "modal pointer and keyboard blocking",
                     "Escape and cancel preserve feedback and invalid draft",

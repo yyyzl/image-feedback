@@ -352,6 +352,7 @@ export component AppWindow inherits Window {
     in property <string> toast-message;
     in property <bool> copy-complete: false;
     callback dismiss-toast();
+    callback resident-quit-requested();
 
     in property <bool> confirm-visible: false;
     in property <string> confirm-title;

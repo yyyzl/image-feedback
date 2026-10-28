@@ -42,6 +42,8 @@ jobs:
         run: ./scripts/install-inno.ps1
       - name: Self-contained static-CRT installer
         run: ./scripts/package-windows.ps1
+      - name: Resident and editor quit regression
+        run: ./scripts/verify-tray-quit.ps1 -Executable target/x86_64-pc-windows-msvc/release/image-feedback-slint.exe -Output artifacts/windows-tray-quit
       - name: Real per-user install, repair and uninstall
         run: ./scripts/verify-windows-install.ps1 -Installer (Get-ChildItem dist/windows/*-setup.exe | Select-Object -First 1).FullName -OutputDirectory artifacts/windows-install
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
@@ -55,7 +57,9 @@ jobs:
         if: always()
         with:
           name: verification-windows
-          path: artifacts/windows-install
+          path: |
+            artifacts/windows-install
+            artifacts/windows-tray-quit
           if-no-files-found: warn
 
   macos:

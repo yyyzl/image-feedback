@@ -23,6 +23,7 @@ mod dialog_smoke;
 #[cfg(test)]
 mod editor_tests;
 mod platform;
+mod quit_ipc;
 mod resident;
 mod smoke_ready;
 
@@ -119,6 +120,7 @@ struct Editor {
     preview_scale_y: f32,
     worker: Option<mpsc::Receiver<Work>>,
     confirmation: Option<ActionConfirmation>,
+    resident_quit_reply: Option<mpsc::Sender<quit_ipc::Decision>>,
     message: Option<AppMessage>,
     smart_enabled: bool,
     analysis: Option<AnalysisService>,
@@ -157,6 +159,7 @@ impl Default for Editor {
             preview_scale_y: 1.,
             worker: None,
             confirmation: None,
+            resident_quit_reply: None,
             message: None,
             smart_enabled: true,
             analysis: None,
@@ -239,6 +242,12 @@ impl Editor {
     }
     fn cancel_confirmation(&mut self) {
         self.confirmation = None;
+        self.answer_resident_quit(quit_ipc::Decision::Cancelled);
+    }
+    fn answer_resident_quit(&mut self, decision: quit_ipc::Decision) {
+        if let Some(reply) = self.resident_quit_reply.take() {
+            let _ = reply.send(decision);
+        }
     }
     fn discard_confirmation(&mut self) -> Option<PendingAction> {
         self.confirmation.take().map(|c| c.action)
@@ -670,6 +679,13 @@ fn sync_confirmation(ui: &AppWindow, e: &Editor) {
             MessageAction::Remove(_) | MessageAction::ClearFeedback
         ));
         ui.set_confirm_destructive(message.destructive);
+        if !ui.get_confirm_visible() {
+            ui.set_confirm_choice(if message.destructive && ui.get_confirm_show_cancel() {
+                0
+            } else {
+                2
+            });
+        }
         ui.set_confirm_footnote(
             if matches!(message.action, MessageAction::Remove(_)) {
                 "移除后可通过撤销恢复。"
@@ -683,10 +699,16 @@ fn sync_confirmation(ui: &AppWindow, e: &Editor) {
         ui.set_confirm_visible(true);
     } else if let Some(c) = e.confirmation.as_ref() {
         let closing = matches!(c.action, PendingAction::Close);
+        let exiting_app = closing && e.resident_quit_reply.is_some();
         ui.set_confirm_show_cancel(true);
         ui.set_confirm_destructive(true);
+        if !ui.get_confirm_visible() {
+            ui.set_confirm_choice(0);
+        }
         ui.set_confirm_title(
-            if closing {
+            if exiting_app {
+                "退出图片反馈？"
+            } else if closing {
                 "关闭当前图片？"
             } else {
                 "替换当前图片？"
@@ -694,7 +716,9 @@ fn sync_confirmation(ui: &AppWindow, e: &Editor) {
             .into(),
         );
         ui.set_confirm_description(
-            if closing {
+            if exiting_app {
+                "退出后将无法继续编辑当前批注，原图不会改变。"
+            } else if closing {
                 "关闭后将无法继续编辑当前批注，原图不会改变。"
             } else {
                 "换图后将无法继续编辑当前批注，原图不会改变。"
@@ -709,7 +733,9 @@ fn sync_confirmation(ui: &AppWindow, e: &Editor) {
         );
         ui.set_confirm_footnote("请先复制需要保留的反馈。".into());
         ui.set_confirm_primary_label(
-            if closing {
+            if exiting_app {
+                "退出并丢弃"
+            } else if closing {
                 "关闭并丢弃"
             } else {
                 "替换并丢弃"
@@ -967,6 +993,33 @@ fn begin_action(ui: &AppWindow, e: &mut Editor, timer: &Rc<slint::Timer>, action
         sync_confirmation(ui, e);
     }
 }
+fn request_resident_quit(
+    ui: &AppWindow,
+    e: &mut Editor,
+    timer: &Rc<slint::Timer>,
+    reply: mpsc::Sender<quit_ipc::Decision>,
+) {
+    let _ = ui.show();
+    ui.window().with_winit_window(|window| {
+        window.set_visible(true);
+        window.set_minimized(false);
+        window.focus_window();
+    });
+    if ui.get_text_composing()
+        || e.worker.is_some()
+        || e.confirmation.is_some()
+        || e.message.is_some()
+    {
+        set_status(ui, "请先完成当前操作，再退出图片反馈");
+        let _ = reply.send(quit_ipc::Decision::Busy);
+    } else if e.has_feedback() {
+        e.resident_quit_reply = Some(reply);
+        begin_action(ui, e, timer, PendingAction::Close);
+    } else {
+        let _ = reply.send(quit_ipc::Decision::Closing);
+        begin_action(ui, e, timer, PendingAction::Close);
+    }
+}
 fn confirmation_response(ui: &AppWindow, e: &mut Editor, timer: &Rc<slint::Timer>, response: i32) {
     if let Some(message) = e.message.take() {
         match message.action {
@@ -994,6 +1047,9 @@ fn confirmation_response(ui: &AppWindow, e: &mut Editor, timer: &Rc<slint::Timer
         0 => e.cancel_confirmation(),
         2 => {
             if let Some(action) = e.discard_confirmation() {
+                if action == PendingAction::Close {
+                    e.answer_resident_quit(quit_ipc::Decision::Closing);
+                }
                 sync_confirmation(ui, e);
                 perform_action(ui, e, timer, action);
                 return;
@@ -1583,6 +1639,35 @@ fn run_editor(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
     }));
     let timer = Rc::new(slint::Timer::default());
     let toast_timer = Rc::new(slint::Timer::default());
+    let (quit_requests, quit_receiver) = mpsc::channel();
+    {
+        let weak = ui.as_weak();
+        let state = editor.clone();
+        let t = timer.clone();
+        ui.on_resident_quit_requested(move || {
+            while let Ok(reply) = quit_receiver.try_recv() {
+                if let Some(ui) = weak.upgrade() {
+                    if let Ok(mut e) = state.try_borrow_mut() {
+                        request_resident_quit(&ui, &mut e, &t, reply);
+                    } else {
+                        let _ = reply.send(quit_ipc::Decision::Busy);
+                    }
+                } else {
+                    let _ = reply.send(quit_ipc::Decision::Busy);
+                }
+            }
+        });
+    }
+    let quit_weak = ui.as_weak();
+    let (quit_server, quit_error) = match quit_ipc::Server::start(&app_dir(), move |reply| {
+        quit_requests.send(reply).map_err(|_| ())?;
+        quit_weak
+            .upgrade_in_event_loop(|ui| ui.invoke_resident_quit_requested())
+            .map_err(|_| ())
+    }) {
+        Ok(server) => (Some(server), None),
+        Err(error) => (None, Some(error)),
+    };
     {
         let weak = ui.as_weak();
         let t = toast_timer.clone();
@@ -2413,7 +2498,15 @@ fn run_editor(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
             slint::CloseRequestResponse::KeepWindowShown
         });
     }
-    set_status(&ui, "本地处理 · 不联网 · 原图保持不变");
+    set_status(&ui, "本地处理 · 不上传 · 原图保持不变");
+    if let Some(error) = quit_error {
+        show_message(
+            &ui,
+            &mut editor.borrow_mut(),
+            "无法接收托盘退出请求",
+            format!("请先手动关闭编辑器，再退出托盘入口。{error}"),
+        );
+    }
     let smoke_result = Rc::new(RefCell::new(None::<String>));
     ui.show()?;
     #[cfg(windows)]
@@ -2598,6 +2691,7 @@ fn run_editor(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
     }
     slint::run_event_loop()?;
     timer.stop();
+    drop(quit_server);
     #[cfg(target_os = "macos")]
     drop(activation_server);
     drop(lock);
@@ -2686,7 +2780,11 @@ fn main() {
     };
     if let Err(error) = result {
         eprintln!("{error}");
-        if !smoke && !args.iter().any(|a| a == "--tray-smoke") {
+        if !smoke
+            && !args
+                .iter()
+                .any(|a| a == "--tray-smoke" || a == "--tray-quit-smoke")
+        {
             let description = error.to_string();
             let _ = std::fs::create_dir_all(app_dir());
             let _ = std::fs::write(app_dir().join("last-startup-error.txt"), &description);
