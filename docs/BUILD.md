@@ -28,7 +28,7 @@ pwsh -File scripts/package-windows.ps1
 运行真实安装、运行中阻止更新、同版本修复安装、已安装程序窗口测试、卸载与数据保留验证：
 
 ```powershell
-pwsh -File scripts/verify-windows-install.ps1 -Installer dist/windows/ImageFeedback-0.1.2-windows-x64-setup.exe
+pwsh -File scripts/verify-windows-install.ps1 -Installer dist/windows/ImageFeedback-0.2.0-windows-x64-setup.exe
 ```
 
 验证脚本检测到已有正式安装时会停止，不覆盖用户安装。它只结束自己启动的、没有编辑器子进程的空闲测试托盘，不终止用户编辑窗口。安装器本身不使用强制进程结束。当前修复测试不是跨版本升级测试；所有升级必须保留[安装器AppId](<../packaging/windows/ImageFeedback.iss>)。
@@ -40,7 +40,7 @@ pwsh -File scripts/verify-windows-install.ps1 -Installer dist/windows/ImageFeedb
 ```sh
 rustup target add aarch64-apple-darwin x86_64-apple-darwin
 bash scripts/package-macos.sh
-bash scripts/verify-macos.sh dist/macos/ImageFeedback-0.1.2-macos-universal-adhoc.dmg
+bash scripts/verify-macos.sh dist/macos/ImageFeedback-0.2.0-macos-universal-adhoc.dmg
 ```
 
 [打包脚本](<../scripts/package-macos.sh>)分别构建arm64/x86_64并以lipo合并，生成Info.plist、icns、许可资源和Applications软链接；两个架构都检查动态库和部署目标。非系统动态库必须完整捆绑，不能通过删除检查来掩盖缺失依赖。最低构建目标为macOS13.0，CI运行系统与最低版本不是同一个测试维度。
