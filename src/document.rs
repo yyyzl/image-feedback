@@ -1,9 +1,9 @@
 //! Pure document/geometry/history core. Image pixels deliberately live elsewhere.
 //!
 //! Coordinates are in original-image pixels. Rectangle interiors must have
-//! positive area; touching source edges do not count as overlap. Out-of-bounds
-//! moves are rejected, not clamped. UI display numbers are vector indices + 1,
-//! never the stable annotation IDs stored here.
+//! positive area; touching source edges do not count as overlap. Points and
+//! sources remain inside the image; transformed block targets may extend beyond
+//! it. UI display numbers are vector indices + 1, not stable annotation IDs.
 
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
@@ -30,9 +30,19 @@ pub struct Rect {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum AnnotationKind {
-    Point { point: Point },
-    Region { rect: Rect },
-    Block { source: Rect, target: Rect },
+    Point {
+        point: Point,
+    },
+    Region {
+        rect: Rect,
+    },
+    Block {
+        source: Rect,
+        target: Rect,
+        /// Clockwise degrees about the center of the unrotated target rectangle.
+        #[serde(default)]
+        rotation: f32,
+    },
     Global,
 }
 
@@ -106,12 +116,13 @@ impl Document {
             match &annotation.kind {
                 AnnotationKind::Point { point } => self.validate_point(*point)?,
                 AnnotationKind::Region { rect } => self.validate_rect(*rect)?,
-                AnnotationKind::Block { source, target } => {
+                AnnotationKind::Block {
+                    source,
+                    target,
+                    rotation,
+                } => {
                     self.validate_rect(*source)?;
-                    self.validate_rect(*target)?;
-                    if source.width != target.width || source.height != target.height {
-                        return Err("a block target must keep its source dimensions".to_owned());
-                    }
+                    self.validate_block_transform(*source, *target, *rotation)?;
                     if sources.iter().any(|other| rects_overlap(**other, *source)) {
                         return Err("block source rectangles must not overlap".to_owned());
                     }
@@ -165,7 +176,7 @@ impl Document {
             }
             AnnotationKind::Region { rect } => {
                 let target = translated(rect, dx, dy);
-                self.validate_rect(target)?;
+                self.validate_block_transform(rect, target, 0.)?;
                 if target == rect {
                     return Ok(());
                 }
@@ -181,18 +192,71 @@ impl Document {
                 AnnotationKind::Block {
                     source: rect,
                     target,
+                    rotation: 0.,
                 }
             }
-            AnnotationKind::Block { source, target } => {
+            AnnotationKind::Block {
+                source,
+                target,
+                rotation,
+            } => {
                 let target = translated(target, dx, dy);
-                self.validate_rect(target)?;
-                AnnotationKind::Block { source, target }
+                self.validate_block_transform(source, target, rotation)?;
+                AnnotationKind::Block {
+                    source,
+                    target,
+                    rotation,
+                }
             }
             AnnotationKind::Global => {
                 return Err("global annotations cannot be moved".to_owned());
             }
         };
         self.annotations[index].kind = replacement;
+        Ok(())
+    }
+
+    /// Replace a block's transform in one transaction, reserving the original
+    /// region on the first real resize/rotation just as moving it does.
+    pub fn transform_annotation(
+        &mut self,
+        id: u64,
+        target: Rect,
+        rotation: f32,
+    ) -> Result<(), String> {
+        self.validate()?;
+        let index = self
+            .annotations
+            .iter()
+            .position(|a| a.id == id)
+            .ok_or_else(|| format!("annotation not found: {id}"))?;
+        let (source, initial_target, initial_rotation) = match self.annotations[index].kind {
+            AnnotationKind::Region { rect } => (rect, rect, 0.),
+            AnnotationKind::Block {
+                source,
+                target,
+                rotation,
+            } => (source, target, rotation),
+            _ => return Err("only regions and blocks can be transformed".into()),
+        };
+        let rotation = crate::transform::normalize_angle(rotation);
+        self.validate_block_transform(source, target, rotation)?;
+        if target == initial_target && rotation == initial_rotation {
+            return Ok(());
+        }
+        if matches!(self.annotations[index].kind, AnnotationKind::Region { .. })
+            && self.annotations.iter().any(|a| {
+                matches!(a.kind,
+                AnnotationKind::Block { source: other, .. } if rects_overlap(other, source))
+            })
+        {
+            return Err("region overlaps an existing block source".into());
+        }
+        self.annotations[index].kind = AnnotationKind::Block {
+            source,
+            target,
+            rotation,
+        };
         Ok(())
     }
 
@@ -241,6 +305,39 @@ impl Document {
         });
         self.next_id = next_id;
         Ok(id)
+    }
+
+    fn validate_block_transform(
+        &self,
+        source: Rect,
+        target: Rect,
+        rotation: f32,
+    ) -> Result<(), String> {
+        if !target.x.is_finite()
+            || !target.y.is_finite()
+            || !target.width.is_finite()
+            || !target.height.is_finite()
+            || !rotation.is_finite()
+            || rotation.abs() > 360.
+        {
+            return Err("block transform must be finite and rotation normalized".into());
+        }
+        let sx = target.width / source.width;
+        let sy = target.height / source.height;
+        if !(crate::transform::MIN_SCALE * 0.9999..=crate::transform::MAX_SCALE * 1.0001)
+            .contains(&sx)
+            || !(crate::transform::MIN_SCALE * 0.9999..=crate::transform::MAX_SCALE * 1.0001)
+                .contains(&sy)
+            || (sx - sy).abs() > sx.max(sy) * 0.0001
+        {
+            return Err("block scaling must be positive, uniform, and within limits".into());
+        }
+        // Bound arithmetic and accidental offscreen gestures without clipping normal partial overflow.
+        let limit = self.image.width.max(self.image.height) as f32 * 64.;
+        if target.x.abs() > limit || target.y.abs() > limit {
+            return Err("block target is too far from the image".into());
+        }
+        Ok(())
     }
 
     fn validate_point(&self, point: Point) -> Result<(), String> {
@@ -437,7 +534,7 @@ mod tests {
 
     fn block(document: &Document, id: u64) -> (Rect, Rect) {
         match document.annotation(id).unwrap().kind {
-            AnnotationKind::Block { source, target } => (source, target),
+            AnnotationKind::Block { source, target, .. } => (source, target),
             _ => panic!("expected block"),
         }
     }
@@ -518,6 +615,72 @@ mod tests {
     }
 
     #[test]
+    fn transform_conversion_is_atomic_undoable_and_backwards_compatible() {
+        let source = rect(10., 10., 20., 10.);
+        let mut history = History::new(document());
+        let id = history.apply(|d| d.add_region(source)).unwrap();
+        let original = history.document().clone();
+        history
+            .apply(|d| d.transform_annotation(id, source, 0.))
+            .unwrap();
+        assert_eq!(history.document(), &original);
+        let target = rect(-5., 25., 40., 20.);
+        history
+            .apply(|d| d.transform_annotation(id, target, 45.))
+            .unwrap();
+        assert!(
+            matches!(history.document().annotation(id).unwrap().kind, AnnotationKind::Block { source: s, target: t, rotation } if s == source && t == target && rotation == 45.)
+        );
+        let transformed = history.document().clone();
+        history.apply(|d| d.move_annotation(id, 7., 3.)).unwrap();
+        assert!(
+            matches!(history.document().annotation(id).unwrap().kind, AnnotationKind::Block { rotation, target: t, .. } if rotation == 45. && t.x == 2.)
+        );
+        assert!(history.undo());
+        assert_eq!(history.document(), &transformed);
+        assert!(history.undo());
+        assert_eq!(history.document(), &original);
+        assert!(history.redo());
+        assert_eq!(history.document(), &transformed);
+        let mut legacy = serde_json::to_value(&transformed).unwrap();
+        legacy["annotations"][0]["kind"]
+            .as_object_mut()
+            .unwrap()
+            .remove("rotation");
+        let legacy: Document = serde_json::from_value(legacy).unwrap();
+        assert!(matches!(
+            legacy.annotation(id).unwrap().kind,
+            AnnotationKind::Block { rotation: 0., .. }
+        ));
+        legacy.validate().unwrap();
+    }
+
+    #[test]
+    fn invalid_transforms_and_overlapping_sources_leave_history_untouched() {
+        let mut d = document();
+        let a = d.add_region(rect(10., 10., 20., 10.)).unwrap();
+        let b = d.add_region(rect(15., 10., 20., 10.)).unwrap();
+        d.transform_annotation(a, rect(30., 30., 40., 20.), 30.)
+            .unwrap();
+        let mut h = History::new(d);
+        let before = h.document().clone();
+        assert!(
+            h.apply(|d| d.transform_annotation(b, rect(25., 25., 20., 10.), 10.))
+                .is_err()
+        );
+        for (r, angle) in [
+            (rect(0., 0., 1., 20.), 0.),
+            (rect(0., 0., 40., 20.), f32::NAN),
+            (rect(0., 0., 0., 0.), 0.),
+            (rect(f32::MAX, 0., 40., 20.), 0.),
+        ] {
+            assert!(h.apply(|d| d.transform_annotation(a, r, angle)).is_err());
+        }
+        assert_eq!(h.document(), &before);
+        assert!(!h.can_undo());
+    }
+
+    #[test]
     fn zero_and_unrepresentable_moves_do_not_convert_a_region() {
         let mut doc = document();
         let id = doc.add_region(rect(10.0, 10.0, 10.0, 10.0)).unwrap();
@@ -559,18 +722,19 @@ mod tests {
         assert_eq!(block(&doc, id).1, rect(0.0, 0.0, 20.0, 15.0));
         doc.move_annotation(id, 80.0, 65.0).unwrap();
         assert_eq!(block(&doc, id).1, rect(80.0, 65.0, 20.0, 15.0));
-        let before = doc.clone();
-        assert!(doc.move_annotation(id, 0.01, 0.0).is_err());
-        assert_eq!(doc, before);
+        doc.move_annotation(id, 0.01, 0.0).unwrap();
+        assert!(block(&doc, id).1.x > 80.0);
+        doc.validate().unwrap();
     }
 
     #[test]
-    fn invalid_first_move_leaves_region_unconverted() {
+    fn out_of_image_block_targets_are_allowed_but_absurd_moves_are_atomic() {
         let mut doc = document();
         let id = doc.add_region(rect(0.0, 0.0, 10.0, 10.0)).unwrap();
+        doc.move_annotation(id, -1.0, 0.0).unwrap();
+        assert_eq!(block(&doc, id).1.x, -1.0);
         let before = doc.clone();
-        assert!(doc.move_annotation(id, -1.0, 0.0).is_err());
-        assert!(doc.move_annotation(id, 0.0, 71.0).is_err());
+        assert!(doc.move_annotation(id, f32::MAX, 0.0).is_err());
         assert_eq!(doc, before);
     }
 

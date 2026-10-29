@@ -26,6 +26,9 @@ impl PreparedFeedback {
         {
             text.push_str("坐标：原图像素；范围=(x, y, 宽, 高)。\n");
         }
+        if storage::has_clipped_block(doc) {
+            text.push_str("注意：图块超出原图边界的部分不会出现在参考图中。\n");
+        }
         text.push('\n');
         append_annotations(&mut text, doc);
         text
@@ -111,17 +114,11 @@ fn append_annotations(text: &mut String, doc: &Document) {
                 "范围 ({:.0}, {:.0}, {:.0}, {:.0})",
                 rect.x, rect.y, rect.width, rect.height
             ),
-            AnnotationKind::Block { source, target } => format!(
-                "移动图块：来源 ({:.0}, {:.0}, {:.0}, {:.0}) → 目标 ({:.0}, {:.0}, {:.0}, {:.0})",
-                source.x,
-                source.y,
-                source.width,
-                source.height,
-                target.x,
-                target.y,
-                target.width,
-                target.height
-            ),
+            AnnotationKind::Block {
+                source,
+                target,
+                rotation,
+            } => storage::block_description(source, target, rotation),
             AnnotationKind::Global => "全局意见".into(),
         };
         let comment = if note.text.trim().is_empty() {

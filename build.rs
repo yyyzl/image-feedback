@@ -12,5 +12,9 @@ fn main() {
             .compile()
             .expect("Could not embed the Windows application icon");
     }
+    // Slint 1.18's custom cursor syntax is experimental; pinning Slint and
+    // setting this only in the single-threaded build script enables the cursor
+    // without requiring an environment variable in production.
+    unsafe { std::env::set_var("SLINT_ENABLE_EXPERIMENTAL_FEATURES", "1") };
     slint_build::compile("ui/app.slint").expect("Could not compile the Slint interface");
 }

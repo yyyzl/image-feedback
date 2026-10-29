@@ -63,6 +63,6 @@ bash scripts/verify-macos.sh dist/macos/ImageFeedback-0.2.1-macos-universal-adho
 
 安装后的窗口回归包含 `smoke-test`、`delivery-smoke`、`dialog-smoke`、`ui-smoke` 和 `update-smoke`。更新窗口场景使用模拟发行说明、不访问网络，检查长说明滚动与键盘操作、关闭更新窗口及取消退出时的批注保护；不运行安装包。其他 UI 场景检查批注收起／展开、失败草稿恢复、键盘编辑及 1000 条批注和最小窗口；行为与证据边界见 [UI 对齐说明](<UI-WEB-ALIGNMENT.md>)。
 
-窗口回归使用真实Slint窗口及场景事件、隔离剪贴板，不是操作系统鼠标/UIA E2E。场景开始前按加载、文件工作与分析状态等待就绪，附加等待上限30秒；超时保留状态和窗口截图，不跳过失败场景。macOS检查真实decoration配置，并调用AppKit `terminate:` 验证退出保护；不把Slint内容截图称为原生traffic-light截图。真实IME、触控板、多屏、Gatekeeper、干净Windows虚拟机及最低macOS版本仍需专项用户实机验收。
+窗口回归使用真实Slint窗口及场景事件、隔离剪贴板，不是操作系统鼠标/UIA E2E。图块变换的场景回归包括新选区直接变换、双旋转入口、四角、缩放旋转后拖动、画布平移、边缘手柄、撤销和参考图。Windows 另可使用 `cargo build --locked` 后执行 `pwsh -File scripts/verify-transform-input.ps1`，以隔离数据目录和真实操作系统鼠标／键盘事件验证主要交互；该脚本会置前测试窗口并移动鼠标。详细边界见 [图块变换说明](<TRANSFORM.md>)。场景开始前按加载、文件工作与分析状态等待就绪，附加等待上限30秒；超时保留状态和窗口截图，不跳过失败场景。macOS检查真实decoration配置，并调用AppKit `terminate:` 验证退出保护；不把Slint内容截图称为原生traffic-light截图。真实IME、触控板、多屏、Gatekeeper、干净Windows虚拟机及最低macOS版本仍需专项用户实机验收。
 
 Windows 可运行 `pwsh -File scripts/verify-tray-quit.ps1` 测试空闲退出、启动竞争、独立编辑器以及有批注时取消后再确认；CI 也对实际发行构建运行该脚本。脚本使用隔离数据目录、实际的托盘与编辑器进程；通过测试场景派发托盘菜单事件，并向测试窗口投递按键消息，不是鼠标点击自动化。失败时只结束它自己启动的测试进程。

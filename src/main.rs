@@ -6,11 +6,13 @@ use image_feedback_slint::{
     document::{AnnotationKind, Document, History, Point, Rect},
     smart_selection::{self, Candidate},
     storage::{self, Asset},
+    transform::{self, Handle},
 };
 use slint::winit_030::{EventResult as NativeEventResult, WinitWindowAccessor};
 use slint::{ComponentHandle, Model, ModelRc, VecModel};
 use std::{
     cell::RefCell,
+    collections::HashMap,
     path::{Path, PathBuf},
     rc::Rc,
     sync::{Arc, mpsc},
@@ -23,9 +25,12 @@ mod dialog_smoke;
 #[cfg(test)]
 mod editor_tests;
 mod platform;
+#[cfg(debug_assertions)]
+mod pointer_probe;
 mod quit_ipc;
 mod resident;
 mod smoke_ready;
+mod transform_smoke;
 mod update_smoke;
 mod update_ui;
 
@@ -57,6 +62,15 @@ enum Gesture {
         dx: f32,
         dy: f32,
     },
+    Transform {
+        id: u64,
+        source: Rect,
+        original: Rect,
+        original_angle: f32,
+        target: Rect,
+        rotation: f32,
+        mode: TransformMode,
+    },
     Pan {
         x: f32,
         y: f32,
@@ -64,6 +78,26 @@ enum Gesture {
         origin_y: f32,
     },
 }
+#[derive(Clone, Copy)]
+enum TransformMode {
+    Resize { corner: usize, offset: Point },
+    Rotate { start_pointer_angle: f32 },
+}
+#[derive(Clone, Copy, PartialEq)]
+struct PreviewKey {
+    source: Rect,
+    width: f32,
+    height: f32,
+    rotation: f32,
+    view_scale: f32,
+    smooth: bool,
+}
+struct PreviewEntry {
+    key: PreviewKey,
+    image: slint::Image,
+    bytes: usize,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq)]
 enum CopyRequest {
     Feedback,
@@ -121,6 +155,7 @@ struct Editor {
     tool: i32,
     preview_scale: f32,
     preview_scale_y: f32,
+    rotated_previews: RefCell<HashMap<u64, PreviewEntry>>,
     worker: Option<mpsc::Receiver<Work>>,
     confirmation: Option<ActionConfirmation>,
     resident_quit_reply: Option<mpsc::Sender<quit_ipc::Decision>>,
@@ -160,6 +195,7 @@ impl Default for Editor {
             tool: 0,
             preview_scale: 1.,
             preview_scale_y: 1.,
+            rotated_previews: RefCell::new(HashMap::new()),
             worker: None,
             confirmation: None,
             resident_quit_reply: None,
@@ -231,6 +267,7 @@ impl Editor {
         self.tool = 0;
         self.preview_scale = 1.;
         self.preview_scale_y = 1.;
+        self.rotated_previews.borrow_mut().clear();
         self.analysis_generation = 0;
         self.analysis_loading = false;
         self.candidates.clear();
@@ -328,6 +365,47 @@ impl Editor {
         self.view.y += dy;
         self.view.fit = false;
     }
+    fn selected_transform(&self) -> Option<(u64, Rect, Rect, f32)> {
+        let id = self.selected?;
+        match self.doc()?.annotation(id)?.kind {
+            AnnotationKind::Region { rect } => Some((id, rect, rect, 0.)),
+            AnnotationKind::Block {
+                source,
+                target,
+                rotation,
+            } => Some((id, source, target, rotation)),
+            _ => None,
+        }
+    }
+    fn rotation_handle(&self, target: Rect, rotation: f32) -> Point {
+        let p = transform::rotation_handle(target, rotation, self.view.scale);
+        let clamp_axis = |value: f32, origin: f32, extent: f32| {
+            let screen = origin + value * self.view.scale;
+            let screen = if extent > 24. {
+                screen.clamp(12., extent - 12.)
+            } else {
+                screen
+            };
+            (screen - origin) / self.view.scale
+        };
+        Point {
+            x: clamp_axis(p.x, self.view.x, self.view.width),
+            y: clamp_axis(p.y, self.view.y, self.view.height),
+        }
+    }
+    fn handle_at(&self, p: Point) -> Option<Handle> {
+        if self.tool != 0 {
+            return None;
+        }
+        let (_, _, target, rotation) = self.selected_transform()?;
+        transform::hit_handle(
+            target,
+            rotation,
+            p,
+            self.view.scale,
+            self.rotation_handle(target, rotation),
+        )
+    }
     fn hit(&self, p: Point) -> Option<u64> {
         let doc = self.doc()?;
         let tolerance = 13. / self.view.scale;
@@ -337,18 +415,20 @@ impl Editor {
                 x: rect.x,
                 y: rect.y,
             }),
-            AnnotationKind::Block { target, .. } => Some(Point {
-                x: target.x,
-                y: target.y,
-            }),
+            AnnotationKind::Block {
+                target, rotation, ..
+            } => Some(transform::corners(target, rotation)[0]),
             AnnotationKind::Global => None,
         };
-        if let Some(a) = doc
-            .annotations
-            .iter()
-            .rev()
-            .find(|a| anchor(a).is_some_and(|q| (q.x - p.x).hypot(q.y - p.y) <= tolerance))
-        {
+        if let Some(a) = doc.annotations.iter().rev().find(|a| {
+            anchor(a).is_some_and(|q| {
+                (q.x - p.x).hypot(q.y - p.y) <= tolerance
+                    || (self.selected == Some(a.id)
+                        && (q.x - 17. / self.view.scale - p.x)
+                            .hypot(q.y - 17. / self.view.scale - p.y)
+                            <= tolerance)
+            })
+        }) {
             return Some(a.id);
         }
         // Preserve an explicitly selected region's drag intent; otherwise moved blocks win
@@ -362,7 +442,7 @@ impl Editor {
             .annotations
             .iter()
             .rev()
-            .find(|a| matches!(a.kind,AnnotationKind::Block{target,..} if contains(target,p)))
+            .find(|a| matches!(a.kind,AnnotationKind::Block{target,rotation,..} if transform::contains(target,rotation,p)))
         {
             return Some(a.id);
         }
@@ -377,21 +457,27 @@ impl Editor {
         let Some(n) = d.annotation(id) else {
             return (0., 0.);
         };
-        let r = match n.kind {
-            AnnotationKind::Region { rect } => rect,
-            AnnotationKind::Block { target, .. } => target,
-            AnnotationKind::Point { point } => Rect {
-                x: point.x,
-                y: point.y,
-                width: 0.,
-                height: 0.,
-            },
-            AnnotationKind::Global => return (0., 0.),
-        };
-        (
-            clamped_axis(r.x, r.width, d.image.width, dx),
-            clamped_axis(r.y, r.height, d.image.height, dy),
-        )
+        match n.kind {
+            AnnotationKind::Region { rect } | AnnotationKind::Block { target: rect, .. } => {
+                let limit = d.image.width.max(d.image.height) as f32 * 64.;
+                let x = if dx.is_finite() {
+                    (rect.x + dx).clamp(-limit, limit) - rect.x
+                } else {
+                    0.
+                };
+                let y = if dy.is_finite() {
+                    (rect.y + dy).clamp(-limit, limit) - rect.y
+                } else {
+                    0.
+                };
+                (x, y)
+            }
+            AnnotationKind::Point { point } => (
+                clamped_axis(point.x, 0., d.image.width, dx),
+                clamped_axis(point.y, 0., d.image.height, dy),
+            ),
+            AnnotationKind::Global => (0., 0.),
+        }
     }
     fn update_eligibility(&mut self, force: bool) -> bool {
         let blocks: Vec<_> = self
@@ -400,8 +486,13 @@ impl Editor {
                 d.annotations
                     .iter()
                     .filter_map(|n| {
-                        if let AnnotationKind::Block { source, target } = n.kind {
-                            Some((source, target))
+                        if let AnnotationKind::Block {
+                            source,
+                            target,
+                            rotation,
+                        } = n.kind
+                        {
+                            Some((source, transform::bounds(target, rotation)))
                         } else {
                             None
                         }
@@ -580,6 +671,7 @@ fn write_feedback_clipboard(e: &mut Editor, text: &str) -> Result<(), String> {
         .map_err(|error| error.to_string())
 }
 fn clear_hover(ui: &AppWindow, e: &mut Editor) {
+    ui.set_canvas_cursor(0);
     e.hover = None;
     e.hover_point = None;
     ui.set_hover_visible(false);
@@ -646,7 +738,24 @@ fn outline_svg(candidate: &Candidate, scale: f32) -> String {
 }
 fn update_hover(ui: &AppWindow, e: &mut Editor, p: Point) {
     e.hover_point = Some(p);
-    let candidate = if ui.get_shift_held() || ui.get_space_held() {
+    let handle = if ui.get_space_held() {
+        None
+    } else {
+        e.handle_at(p)
+    };
+    let cursor = match handle {
+        Some(Handle::Rotate) => 3,
+        Some(Handle::Resize(i)) => {
+            let (_, _, rect, angle) = e.selected_transform().unwrap();
+            let corners = transform::corners(rect, angle);
+            let dx = corners[i].x - corners[(i + 2) % 4].x;
+            let dy = corners[i].y - corners[(i + 2) % 4].y;
+            if dx * dy >= 0. { 1 } else { 2 }
+        }
+        None => 0,
+    };
+    ui.set_canvas_cursor(cursor);
+    let candidate = if ui.get_shift_held() || ui.get_space_held() || handle.is_some() {
         None
     } else {
         e.candidate_at(p)
@@ -784,8 +893,62 @@ fn sync_confirmation(ui: &AppWindow, e: &Editor) {
         ui.set_confirm_visible(false);
     }
 }
+fn rotated_image(e: &Editor, id: u64, source: Rect, target: Rect, rotation: f32) -> slint::Image {
+    let Some(asset) = e.asset.as_ref() else {
+        return slint::Image::default();
+    };
+    let key = PreviewKey {
+        source,
+        width: target.width,
+        height: target.height,
+        rotation,
+        view_scale: e.view.scale,
+        smooth: !matches!(e.gesture, Some(Gesture::Transform { id: active, .. }) if active == id),
+    };
+    let mut cache = e.rotated_previews.borrow_mut();
+    if let Some(entry) = cache.get(&id) {
+        if entry.key == key {
+            return entry.image.clone();
+        }
+    }
+    cache.remove(&id);
+    // Translation does not affect the image; retaining it keeps moving a rotated block cheap.
+    let target = Rect {
+        x: -target.width / 2.,
+        y: -target.height / 2.,
+        ..target
+    };
+    let pixels = storage::rotated_preview(
+        &asset.pixels,
+        source,
+        target,
+        rotation,
+        e.view.scale,
+        key.smooth,
+    );
+    let bytes = pixels.as_raw().len();
+    if cache.values().map(|v| v.bytes).sum::<usize>() + bytes > 64 * 1024 * 1024 {
+        cache.clear();
+    }
+    let buffer = slint::SharedPixelBuffer::<slint::Rgba8Pixel>::clone_from_slice(
+        pixels.as_raw(),
+        pixels.width(),
+        pixels.height(),
+    );
+    let image = slint::Image::from_rgba8(buffer);
+    cache.insert(
+        id,
+        PreviewEntry {
+            key,
+            image: image.clone(),
+            bytes,
+        },
+    );
+    image
+}
 fn sync(ui: &AppWindow, e: &mut Editor) {
     sync_confirmation(ui, e);
+    ui.set_transform_available(e.tool == 0 && e.selected_transform().is_some());
     ui.set_delivery_ready(e.delivery.is_some());
     ui.set_smart_enabled(e.smart_enabled);
     if e.update_eligibility(false) || e.gesture.is_some() {
@@ -833,7 +996,7 @@ fn sync(ui: &AppWindow, e: &mut Editor) {
     let mut notes = Vec::new();
     for (index, a) in doc.annotations.iter().enumerate() {
         let selected = e.selected == Some(a.id);
-        let (kind, detail, r, source, point, block) = match a.kind {
+        let (kind, detail, r, source, point, block, rotation) = match a.kind {
             AnnotationKind::Region { rect } => (
                 "范围批注",
                 format!(
@@ -844,6 +1007,7 @@ fn sync(ui: &AppWindow, e: &mut Editor) {
                 rect,
                 false,
                 false,
+                0.,
             ),
             AnnotationKind::Point { point } => (
                 "点批注",
@@ -862,18 +1026,20 @@ fn sync(ui: &AppWindow, e: &mut Editor) {
                 },
                 true,
                 false,
+                0.,
             ),
-            AnnotationKind::Block { source, target } => (
-                "图块移动",
-                format!(
-                    "位移 x {:+.0} · y {:+.0} px",
-                    target.x - source.x,
-                    target.y - source.y
-                ),
+            AnnotationKind::Block {
+                source,
+                target,
+                rotation,
+            } => (
+                "图块变换",
+                "拖动、缩放或旋转图块".to_string(),
                 target,
                 source,
                 false,
                 true,
+                rotation,
             ),
             AnnotationKind::Global => (
                 "整体意见",
@@ -892,6 +1058,7 @@ fn sync(ui: &AppWindow, e: &mut Editor) {
                 },
                 false,
                 false,
+                0.,
             ),
         };
         if refresh_notes {
@@ -920,21 +1087,55 @@ fn sync(ui: &AppWindow, e: &mut Editor) {
         }
         if !matches!(a.kind, AnnotationKind::Global) {
             let mut r = r;
+            let mut angle = rotation;
             let mut moving = false;
-            if let Some(Gesture::Move { id, dx, dy, .. }) = e.gesture {
-                if id == a.id {
+            match e.gesture.as_ref() {
+                Some(Gesture::Move { id, dx, dy, .. }) if *id == a.id => {
                     r.x += dx;
                     r.y += dy;
-                    moving = dx.hypot(dy) * e.view.scale >= 2.;
+                    moving = dx.hypot(*dy) * e.view.scale >= 2.;
                 }
+                Some(Gesture::Transform {
+                    id,
+                    target,
+                    rotation,
+                    ..
+                }) if *id == a.id => {
+                    r = *target;
+                    angle = *rotation;
+                    moving = r != source || angle.abs() > 0.001;
+                }
+                _ => {}
             }
+            let bounds = if point {
+                r
+            } else {
+                transform::bounds(r, angle)
+            };
+            let corners = if point {
+                [Point { x: r.x, y: r.y }; 4]
+            } else {
+                transform::corners(r, angle)
+            };
+            let relative = |p: Point| Point {
+                x: (p.x - bounds.x) * e.view.scale,
+                y: (p.y - bounds.y) * e.view.scale,
+            };
+            let [p0, p1, p2, p3] = corners.map(relative);
+            let rh = relative(e.rotation_handle(r, angle));
+            let rotated = angle.abs() > 0.001;
+            let rotated_image = if (block || moving) && rotated {
+                rotated_image(e, a.id, source, r, angle)
+            } else {
+                slint::Image::default()
+            };
             marks.push(Mark {
                 id: index as i32 + 1,
                 number: index as i32 + 1,
-                x: e.view.x + r.x * e.view.scale,
-                y: e.view.y + r.y * e.view.scale,
-                w: r.width * e.view.scale,
-                h: r.height * e.view.scale,
+                x: e.view.x + bounds.x * e.view.scale,
+                y: e.view.y + bounds.y * e.view.scale,
+                w: bounds.width * e.view.scale,
+                h: bounds.height * e.view.scale,
                 is_point: point,
                 selected,
                 is_block: block || moving,
@@ -942,6 +1143,18 @@ fn sync(ui: &AppWindow, e: &mut Editor) {
                 source_y: source.y * e.preview_scale_y,
                 source_w: source.width * e.preview_scale,
                 source_h: source.height * e.preview_scale_y,
+                rotated,
+                rotated_image,
+                p0x: p0.x,
+                p0y: p0.y,
+                p1x: p1.x,
+                p1y: p1.y,
+                p2x: p2.x,
+                p2y: p2.y,
+                p3x: p3.x,
+                p3y: p3.y,
+                rotate_x: rh.x,
+                rotate_y: rh.y,
             });
         }
     }
@@ -1182,6 +1395,7 @@ fn install(ui: &AppWindow, e: &mut Editor, doc: Document, asset: Asset, thumb: R
     e.preview_scale_y = thumb.height() as f32 / asset.pixels.height() as f32;
     e.history = Some(History::new(doc));
     e.asset = Some(Arc::new(asset));
+    e.rotated_previews.borrow_mut().clear();
     e.delivery = None;
     e.revealed_selection = None;
     e.selected = None;
@@ -1512,6 +1726,7 @@ fn smoke_interactions(
     if state.borrow().doc().unwrap().annotations.len() != 1 {
         return Err("region note count mismatch".into());
     }
+    transform_smoke::check_region(ui, state, id)?;
     let (x, y) = screen(240., 270.);
     let (x2, y2) = screen(270., 285.);
     canvas_press(ui, x, y, 0);
@@ -1527,6 +1742,7 @@ fn smoke_interactions(
     ) {
         return Err("dragging region did not create a block".into());
     }
+    transform_smoke::check(ui, state, folder, id)?;
     // Exercise the ready-cache path here; the delivery smoke separately tests asynchronous preparation.
     let (copy_doc, copy_asset) = {
         let e = state.borrow();
@@ -1632,7 +1848,7 @@ fn smoke_interactions(
     if std::fs::read(&prepared.original).map_err(|e| e.to_string())? != asset.original {
         return Err("snapshot did not preserve the original image".into());
     }
-    let report = serde_json::json!({"result":"interactions_passed","platform":std::env::consts::OS,"native_chrome":ui.get_native_chrome(),"appkit_quit_guard_checked":cfg!(target_os="macos"),"slint":"1.18.1","method":"real Slint window; scene-dispatched pointer events for hover/selection/drag/copy/close, callbacks for editing commands; isolated clipboard sink, not OS mouse automation","checks":["unpressed hover through the real TouchArea event bridge","hover exit and re-entry","single forwarding for each drag pointer event","copy after movement includes coordinates and success toast","clipboard failure notification and retry","platform close uses the discard guard; native AppKit Quit is also checked on macOS","native hover without document mutation","click adopts pressed recommendation","smart toggle with manual fallback","region selection","Chinese note commit","region to block drag","point annotation","global annotation","undo and redo callbacks","pointer-anchored zoom","durable snapshot preserves original bytes"],"annotations":doc.annotations.len(),"screenshot":"editor.png"});
+    let report = serde_json::json!({"result":"interactions_passed","platform":std::env::consts::OS,"native_chrome":ui.get_native_chrome(),"appkit_quit_guard_checked":cfg!(target_os="macos"),"slint":"1.18.1","method":"real Slint window; scene-dispatched pointer events for hover/selection/drag/copy/close, callbacks for editing commands; isolated clipboard sink, not OS mouse automation","checks":["unpressed hover through the real TouchArea event bridge","hover exit and re-entry","single forwarding for each drag pointer event","copy after movement includes coordinates and success toast","clipboard failure notification and retry","platform close uses the discard guard; native AppKit Quit is also checked on macOS","native hover without document mutation","click adopts pressed recommendation","smart toggle with manual fallback","region selection","Chinese note commit","region to block drag","resize, both rotation entry points at all four corners, move after transform, undo/redo and transformed reference","point annotation","global annotation","undo and redo callbacks","pointer-anchored zoom","durable snapshot preserves original bytes"],"annotations":doc.annotations.len(),"screenshot":"editor.png"});
     std::fs::write(
         folder.join("smoke-report.json"),
         serde_json::to_vec_pretty(&report).unwrap(),
@@ -1681,7 +1897,8 @@ fn run_editor(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
     let activation_server = platform::start_activation_server(ui.as_weak())?;
     let editor = Rc::new(RefCell::new(Editor {
         clipboard_probe: args.iter().any(|arg| {
-            arg == "--smoke-test"
+            (cfg!(debug_assertions) && arg == "--native-pointer-probe")
+                || arg == "--smoke-test"
                 || arg == "--dialog-smoke"
                 || arg == "--delivery-smoke"
                 || arg == "--ui-smoke"
@@ -1771,8 +1988,11 @@ fn run_editor(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
                         ui.set_space_held(false);
                         ui.set_shift_held(false);
                         if let Ok(mut e) = state.try_borrow_mut() {
-                            e.gesture = None;
+                            let had_gesture = e.gesture.take().is_some();
                             ui.set_preview_visible(false);
+                            if had_gesture {
+                                sync(&ui, &mut e);
+                            }
                         }
                     }
                 }
@@ -1858,8 +2078,13 @@ fn run_editor(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
         ui.on_viewport_resized(move |w, h| {
             if let Some(ui) = weak.upgrade() {
                 if let Ok(mut e) = state.try_borrow_mut() {
-                    if e.view.fit && w > 0. && h > 0. {
-                        e.fit(w, h);
+                    if w > 0. && h > 0. {
+                        if e.view.fit {
+                            e.fit(w, h);
+                        } else {
+                            e.view.width = w;
+                            e.view.height = h;
+                        }
                         sync(&ui, &mut e);
                     }
                 }
@@ -2368,10 +2593,52 @@ fn run_editor(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
                 });
                 return;
             }
-            if button != 0 || !e.inside(p) {
+            if button != 0 {
+                return;
+            }
+            // Handle hit testing precedes image bounds and ordinary selection, so
+            // partially off-image blocks and their controls remain manipulable.
+            if let Some(handle) = e.handle_at(p) {
+                let (id, source, target, rotation) = e.selected_transform().unwrap();
+                let mode = match handle {
+                    Handle::Resize(corner) => {
+                        let q = transform::corners(target, rotation)[corner];
+                        TransformMode::Resize {
+                            corner,
+                            offset: Point {
+                                x: p.x - q.x,
+                                y: p.y - q.y,
+                            },
+                        }
+                    }
+                    Handle::Rotate => {
+                        let c = transform::center(target);
+                        TransformMode::Rotate {
+                            start_pointer_angle: (p.y - c.y).atan2(p.x - c.x).to_degrees(),
+                        }
+                    }
+                };
+                ui.set_canvas_cursor(if matches!(handle, Handle::Rotate) {
+                    3
+                } else {
+                    1
+                });
+                e.gesture = Some(Gesture::Transform {
+                    id,
+                    source,
+                    original: target,
+                    original_angle: rotation,
+                    target,
+                    rotation,
+                    mode,
+                });
+                sync(&ui, &mut e);
                 return;
             }
             if e.tool == 1 {
+                if !e.inside(p) {
+                    return;
+                }
                 if let Some(h) = e.history.as_mut() {
                     match h.apply(|d| d.add_point(p)) {
                         Ok(id) => e.selected = Some(id),
@@ -2391,6 +2658,9 @@ fn run_editor(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
                     dy: 0.,
                 });
             } else {
+                if !e.inside(p) {
+                    return;
+                }
                 e.selected = None;
                 e.gesture = Some(Gesture::Select {
                     start: p,
@@ -2460,6 +2730,64 @@ fn run_editor(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
                     let (dx, dy) = e.bounded_delta(id, p.x - start.x, p.y - start.y);
                     e.gesture = Some(Gesture::Move { id, start, dx, dy });
                 }
+                Gesture::Transform {
+                    id,
+                    source,
+                    original,
+                    original_angle,
+                    target,
+                    rotation,
+                    mode,
+                } => {
+                    let p = e.point(x, y);
+                    let (next_target, next_rotation) = match mode {
+                        TransformMode::Resize { corner, offset } => (
+                            transform::resize(
+                                source,
+                                original,
+                                original_angle,
+                                corner,
+                                Point {
+                                    x: p.x - offset.x,
+                                    y: p.y - offset.y,
+                                },
+                            ),
+                            original_angle,
+                        ),
+                        TransformMode::Rotate {
+                            start_pointer_angle,
+                        } => {
+                            let c = transform::center(original);
+                            if (p.x - c.x).hypot(p.y - c.y) * e.view.scale < 2. {
+                                (target, rotation)
+                            } else {
+                                let pointer_angle = (p.y - c.y).atan2(p.x - c.x).to_degrees();
+                                let mut angle = transform::normalize_angle(
+                                    original_angle + pointer_angle - start_pointer_angle,
+                                );
+                                if ui.get_shift_held() {
+                                    angle = transform::normalize_angle((angle / 15.).round() * 15.);
+                                }
+                                (original, angle)
+                            }
+                        }
+                    };
+                    let limit = e
+                        .doc()
+                        .map(|d| d.image.width.max(d.image.height) as f32 * 64.)
+                        .unwrap_or(0.);
+                    if next_target.x.abs() <= limit && next_target.y.abs() <= limit {
+                        e.gesture = Some(Gesture::Transform {
+                            id,
+                            source,
+                            original,
+                            original_angle,
+                            target: next_target,
+                            rotation: next_rotation,
+                            mode,
+                        });
+                    }
+                }
             }
             sync(&ui, &mut e);
         });
@@ -2496,10 +2824,7 @@ fn run_editor(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
                                 match h.apply(|d| d.add_region(rect)) {
                                     Ok(id) => {
                                         e.selected = Some(id);
-                                        set_status(
-                                            &ui,
-                                            "选区已创建 · 直接输入意见，或拖动范围移动图块",
-                                        );
+                                        set_status(&ui, "选区已创建 · 拖动、缩放或旋转后填写意见");
                                     }
                                     Err(err) => show_message(&ui, &mut e, "无法完成操作", err),
                                 }
@@ -2514,6 +2839,30 @@ fn run_editor(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
                                 show_message(&ui, &mut e, "无法完成操作", err);
                             } else {
                                 set_status(&ui, "位置已更新 · 原图像素保持不变");
+                            }
+                        }
+                    }
+                }
+                Gesture::Transform {
+                    id,
+                    original,
+                    original_angle,
+                    target,
+                    rotation,
+                    ..
+                } => {
+                    let moved = (target.x - original.x).hypot(target.y - original.y) * e.view.scale
+                        >= 1.
+                        || (target.width - original.width).abs() * e.view.scale >= 1.
+                        || transform::normalize_angle(rotation - original_angle).abs() >= 0.5;
+                    if moved {
+                        if let Some(h) = e.history.as_mut() {
+                            if let Err(err) =
+                                h.apply(|d| d.transform_annotation(id, target, rotation))
+                            {
+                                show_message(&ui, &mut e, "无法完成变换", err);
+                            } else {
+                                set_status(&ui, "图块已调整 · 原图像素保持不变");
                             }
                         }
                     }
@@ -2778,6 +3127,8 @@ fn run_editor(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
             },
         );
     }
+    #[cfg(debug_assertions)]
+    let _pointer_probe = pointer_probe::start(args, &ui, &editor);
     slint::run_event_loop()?;
     timer.stop();
     update_timer.stop();

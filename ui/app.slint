@@ -26,6 +26,13 @@ export struct Mark {
     source-y: float,
     source-w: float,
     source-h: float,
+    rotated: bool,
+    rotated-image: image,
+    p0x: float, p0y: float,
+    p1x: float, p1y: float,
+    p2x: float, p2y: float,
+    p3x: float, p3y: float,
+    rotate-x: float, rotate-y: float,
 }
 
 struct NoteViewState {
@@ -267,6 +274,9 @@ export component AppWindow inherits Window {
     in property <[NoteRow]> notes;
     in property <int> active-note-token: 0;
     in property <[Mark]> marks;
+    in property <bool> transform-available: false;
+    // 0 default, 1/2 diagonal resize, 3 rotation.
+    in property <int> canvas-cursor: 0;
     in property <float> canvas-x: 0;
     in property <float> canvas-y: 0;
     in property <float> canvas-w: 0;
@@ -634,8 +644,8 @@ export component AppWindow inherits Window {
                     y: 15px;
                     width: parent.width - 132px;
                     height: 18px;
-                    visible: root.busy;
-                    text: root.status-text;
+                    visible: root.busy || root.transform-available;
+                    text: root.busy ? root.status-text : "拖内部移动 · 拖角缩放 · 拖角外或上方旋转";
                     color: #98a0ac;
                     font-size: 11px;
                     overflow: elide;
@@ -688,47 +698,71 @@ export component AppWindow inherits Window {
                     height: mark.is-point ? 0px : mark.h * 1px;
                     background: transparent;
 
-                    if !mark.is-point : Rectangle {
-                        width: parent.width;
-                        height: parent.height;
-                        background: mark.is-block ? #fefefe : (mark.selected ? #d94b4010 : #d94b4006);
-                        border-width: mark.selected ? 2px : 1px;
-                        border-color: #dc5147;
+                    // Software renderer cannot rotate items; Rust provides a bounded
+                    // transparent raster for rotated blocks. Axis-aligned blocks use the preview image directly.
+                    if mark.is-block && !mark.is-point && mark.rotated : Image {
+                        width: parent.width; height: parent.height;
+                        source: mark.rotated-image; image-fit: fill;
                     }
-                    // Clip coordinates are pixels in source-image (the Rust-supplied preview image).
-                    // Slint 1.18.1 defines all four source-clip-* properties as integers.
-                    // Border and pin are separate and intentionally have no resize handles.
-                    if mark.is-block && !mark.is-point : Image {
-                        x: 2px;
-                        y: 2px;
-                        width: parent.width > 4px ? parent.width - 4px : 0px;
-                        height: parent.height > 4px ? parent.height - 4px : 0px;
+                    if mark.is-block && !mark.is-point && !mark.rotated : Image {
+                        width: parent.width; height: parent.height;
                         source: root.source-image;
-                        source-clip-x: round(mark.source-x);
-                        source-clip-y: round(mark.source-y);
-                        source-clip-width: round(mark.source-w);
-                        source-clip-height: round(mark.source-h);
+                        source-clip-x: round(mark.source-x); source-clip-y: round(mark.source-y);
+                        source-clip-width: round(mark.source-w); source-clip-height: round(mark.source-h);
                         image-fit: fill;
                     }
+                    if !mark.is-point && !mark.rotated : Rectangle {
+                        width: parent.width; height: parent.height;
+                        background: mark.is-block ? transparent : (mark.selected ? #d94b4010 : #d94b4006);
+                        border-width: mark.selected ? 2px : 1px; border-color: #dc5147;
+                    }
+                    if !mark.is-point && mark.rotated : Path {
+                        width: parent.width; height: parent.height;
+                        viewbox-width: mark.w; viewbox-height: mark.h; fit: fill;
+                        stroke: #dc5147; stroke-width: mark.selected ? 2px : 1px; fill: transparent;
+                        MoveTo { x: mark.p0x; y: mark.p0y; }
+                        LineTo { x: mark.p1x; y: mark.p1y; }
+                        LineTo { x: mark.p2x; y: mark.p2y; }
+                        LineTo { x: mark.p3x; y: mark.p3y; }
+                        Close { }
+                    }
                     Rectangle {
-                        x: -13px;
-                        y: -13px;
-                        width: 26px;
-                        height: 26px;
-                        border-radius: 13px;
-                        border-width: 2px;
-                        border-color: #ffffff;
+                        x: (mark.p0x - (mark.selected && !mark.is-point ? 17 : 0)) * 1px - 13px;
+                        y: (mark.p0y - (mark.selected && !mark.is-point ? 17 : 0)) * 1px - 13px;
+                        width: 26px; height: 26px; border-radius: 13px;
+                        border-width: 2px; border-color: #ffffff;
                         background: mark.selected ? #be352e : #dc5147;
                         Text {
-                            width: parent.width;
-                            height: parent.height;
-                            text: mark.number;
-                            color: #ffffff;
-                            font-size: 12px;
-                            font-weight: 700;
-                            horizontal-alignment: center;
-                            vertical-alignment: center;
+                            width: parent.width; height: parent.height; text: mark.number;
+                            color: #ffffff; font-size: 12px; font-weight: 700;
+                            horizontal-alignment: center; vertical-alignment: center;
                         }
+                    }
+                }
+                // Controls are screen-sized and drawn last, so they stay usable at any zoom.
+                for mark in root.marks : Rectangle {
+                    visible: mark.selected && !mark.is-point;
+                    x: mark.x * 1px; y: mark.y * 1px;
+                    width: mark.w * 1px; height: mark.h * 1px; background: transparent;
+                    Path {
+                        width: parent.width; height: parent.height;
+                        viewbox-width: mark.w; viewbox-height: mark.h; fit: fill; clip: false;
+                        stroke: #dc5147; stroke-width: 1px; fill: transparent;
+                        MoveTo { x: (mark.p0x + mark.p1x) / 2; y: (mark.p0y + mark.p1y) / 2; }
+                        LineTo { x: mark.rotate-x; y: mark.rotate-y; }
+                    }
+                    for handle in [ { x: mark.p0x, y: mark.p0y }, { x: mark.p1x, y: mark.p1y },
+                                    { x: mark.p2x, y: mark.p2y }, { x: mark.p3x, y: mark.p3y } ] : Rectangle {
+                        x: handle.x * 1px - 6px; y: handle.y * 1px - 6px;
+                        width: 12px; height: 12px; background: #ffffff; border-width: 2px; border-color: #dc5147;
+                    }
+                    Rectangle {
+                        x: mark.rotate-x * 1px - 10px; y: mark.rotate-y * 1px - 10px;
+                        width: 20px; height: 20px; border-radius: 10px;
+                        background: #ffffff; border-width: 2px; border-color: #dc5147;
+                        Path { x: 4px; y: 4px; width: 12px; height: 12px;
+                            commands: "M 10 4 A 5 5 0 1 0 10 8 M 10 4 L 10 1 M 10 4 L 7 4";
+                            stroke: #dc5147; stroke-width: 1.5px; fill: transparent; }
                     }
                 }
                 if root.hover-visible && !root.busy : Image {
@@ -772,8 +806,16 @@ export component AppWindow inherits Window {
                         if event.text == " " { root.space-held = false; return accept; }
                         return reject;
                     }
+                    rotationCursor := TouchArea {
+                        enabled: false;
+                        mouse-cursor: custom(@image-url("../assets/rotate-cursor.svg"), 12, 12);
+                    }
                     canvasTouch := TouchArea {
                         enabled: root.loaded && !root.busy && !root.text-composing;
+                        mouse-cursor: root.space-held || root.tool == 2 ? grab
+                            : root.canvas-cursor == 3 ? rotationCursor.mouse-cursor
+                            : root.canvas-cursor == 1 ? nwse-resize
+                            : root.canvas-cursor == 2 ? nesw-resize : default;
                         changed has-hover => { if !self.has-hover { root.canvas-command("leave"); } }
                         pointer-event(event) => {
                             if event.kind == PointerEventKind.down {
