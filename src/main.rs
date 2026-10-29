@@ -26,6 +26,8 @@ mod platform;
 mod quit_ipc;
 mod resident;
 mod smoke_ready;
+mod update_smoke;
+mod update_ui;
 
 #[derive(Clone, Copy, Default)]
 struct View {
@@ -1661,6 +1663,7 @@ fn run_editor(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
                 || arg == "--dialog-smoke"
                 || arg == "--delivery-smoke"
                 || arg == "--ui-smoke"
+                || arg == "--update-smoke"
         }) {
             return Err("请关闭现有编辑器后再运行窗口自检（未修改现有进程）".into());
         }
@@ -1682,11 +1685,13 @@ fn run_editor(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
                 || arg == "--dialog-smoke"
                 || arg == "--delivery-smoke"
                 || arg == "--ui-smoke"
+                || arg == "--update-smoke"
         }),
         ..Editor::default()
     }));
     let timer = Rc::new(slint::Timer::default());
     let toast_timer = Rc::new(slint::Timer::default());
+    let update_timer = update_ui::install(&ui, app_dir(), !editor.borrow().clipboard_probe);
     let (quit_requests, quit_receiver) = mpsc::channel();
     {
         let weak = ui.as_weak();
@@ -2531,6 +2536,10 @@ fn run_editor(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
                 return slint::CloseRequestResponse::KeepWindowShown;
             };
             e.close_requests = e.close_requests.wrapping_add(1);
+            if ui.get_update_visible() && !ui.get_confirm_visible() {
+                ui.invoke_update_dismiss();
+                return slint::CloseRequestResponse::KeepWindowShown;
+            }
             if ui.get_text_composing() {
                 set_status(&ui, "请先确认或取消输入法候选，再关闭窗口");
                 return slint::CloseRequestResponse::KeepWindowShown;
@@ -2598,7 +2607,11 @@ fn run_editor(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
     }
     // Startup loading happens once, after the real viewport has been laid out.
     let smoke = args.iter().any(|a| {
-        a == "--smoke-test" || a == "--dialog-smoke" || a == "--delivery-smoke" || a == "--ui-smoke"
+        a == "--smoke-test"
+            || a == "--dialog-smoke"
+            || a == "--delivery-smoke"
+            || a == "--ui-smoke"
+            || a == "--update-smoke"
     });
     let demo = smoke || args.iter().any(|a| a == "--demo");
     let input = args
@@ -2728,6 +2741,24 @@ fn run_editor(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
             },
         );
     }
+    if let Some(index) = args.iter().position(|arg| arg == "--update-smoke") {
+        let folder = args
+            .get(index + 1)
+            .map(PathBuf::from)
+            .unwrap_or_else(|| PathBuf::from("artifacts/update-smoke"));
+        let state = editor.clone();
+        let failure = smoke_result.clone();
+        smoke_ready::start(
+            ui.as_weak(),
+            state.clone(),
+            folder.clone(),
+            failure.clone(),
+            Duration::from_secs(2),
+            move |ui| {
+                update_smoke::start(ui, state, folder, failure);
+            },
+        );
+    }
     if let Some(index) = args.iter().position(|arg| arg == "--ui-smoke") {
         let folder = args
             .get(index + 1)
@@ -2749,6 +2780,7 @@ fn run_editor(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
     }
     slint::run_event_loop()?;
     timer.stop();
+    update_timer.stop();
     drop(quit_server);
     #[cfg(target_os = "macos")]
     drop(activation_server);
@@ -2772,6 +2804,15 @@ fn run_editor(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
             .unwrap_or_else(|| PathBuf::from("artifacts/delivery-smoke"));
         if !folder.join("delivery-report.json").is_file() {
             return Err("窗口在图片交付回归完成前退出".into());
+        }
+    }
+    if let Some(index) = args.iter().position(|arg| arg == "--update-smoke") {
+        let folder = args
+            .get(index + 1)
+            .map(PathBuf::from)
+            .unwrap_or_else(|| PathBuf::from("artifacts/update-smoke"));
+        if !folder.join("update-report.json").is_file() {
+            return Err("窗口在更新界面回归完成前退出".into());
         }
     }
     if let Some(index) = args.iter().position(|arg| arg == "--ui-smoke") {
@@ -2825,7 +2866,11 @@ fn main() {
     }
     let _installation_guard = platform::installation_guard();
     let smoke = args.iter().any(|a| {
-        a == "--smoke-test" || a == "--dialog-smoke" || a == "--delivery-smoke" || a == "--ui-smoke"
+        a == "--smoke-test"
+            || a == "--dialog-smoke"
+            || a == "--delivery-smoke"
+            || a == "--ui-smoke"
+            || a == "--update-smoke"
     });
     let result = if smoke
         || args

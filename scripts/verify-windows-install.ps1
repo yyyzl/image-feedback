@@ -42,11 +42,11 @@ Install-App
 $oldBackend=$env:SLINT_BACKEND
 try {
     $env:SLINT_BACKEND='winit-software'
-    foreach($mode in @('smoke-test','delivery-smoke','dialog-smoke','ui-smoke')){
+    foreach($mode in @('smoke-test','delivery-smoke','dialog-smoke','ui-smoke','update-smoke')){
         $dir=Join-Path $output $mode
         $p=Start-Process -FilePath $exe -ArgumentList @('--editor',"--$mode","`"$dir`"") -WorkingDirectory $install -Wait -PassThru
         if($p.ExitCode -ne 0){throw "Installed application test failed: $mode ($($p.ExitCode))"}
-        $reportName=switch($mode){'smoke-test'{'smoke-report.json'} 'delivery-smoke'{'delivery-report.json'} 'dialog-smoke'{'dialog-report.json'} 'ui-smoke'{'ui-report.json'}}
+        $reportName=switch($mode){'smoke-test'{'smoke-report.json'} 'delivery-smoke'{'delivery-report.json'} 'dialog-smoke'{'dialog-report.json'} 'ui-smoke'{'ui-report.json'} 'update-smoke'{'update-report.json'}}
         $report=Get-Content -Raw -LiteralPath (Join-Path $dir $reportName)|ConvertFrom-Json
         if($report.result -ne 'passed'){throw "Missing completed report: $mode"}
     }

@@ -61,7 +61,7 @@ bash scripts/verify-macos.sh dist/macos/ImageFeedback-0.2.1-macos-universal-adho
 
 [CI](<../.github/workflows/build.yml>)运行Windows、Apple Silicon和Intel验证。标签发行只在所需job成功后发布安装器、Universal DMG及SHA-256；源码、工具和测试数据不混入用户图片。
 
-安装后的窗口回归包含 `smoke-test`、`delivery-smoke`、`dialog-smoke` 和 `ui-smoke`。新增 UI 场景检查批注收起／展开、失败草稿恢复、键盘编辑及 1000 条批注和最小窗口；行为与证据边界见 [UI 对齐说明](<UI-WEB-ALIGNMENT.md>)。
+安装后的窗口回归包含 `smoke-test`、`delivery-smoke`、`dialog-smoke`、`ui-smoke` 和 `update-smoke`。更新窗口场景使用模拟发行说明、不访问网络，检查长说明滚动与键盘操作、关闭更新窗口及取消退出时的批注保护；不运行安装包。其他 UI 场景检查批注收起／展开、失败草稿恢复、键盘编辑及 1000 条批注和最小窗口；行为与证据边界见 [UI 对齐说明](<UI-WEB-ALIGNMENT.md>)。
 
 窗口回归使用真实Slint窗口及场景事件、隔离剪贴板，不是操作系统鼠标/UIA E2E。场景开始前按加载、文件工作与分析状态等待就绪，附加等待上限30秒；超时保留状态和窗口截图，不跳过失败场景。macOS检查真实decoration配置，并调用AppKit `terminate:` 验证退出保护；不把Slint内容截图称为原生traffic-light截图。真实IME、触控板、多屏、Gatekeeper、干净Windows虚拟机及最低macOS版本仍需专项用户实机验收。
 

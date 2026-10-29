@@ -55,6 +55,7 @@ component ActionButton inherits Rectangle {
     in property <bool> quiet: false;
     in property <bool> enabled: true;
     in property <bool> destructive: false;
+    in property <bool> accent: false;
     in property <bool> focus-ring: false;
     in property <bool> blocks-scroll: false;
     in property <length> font-size: 12px;
@@ -63,7 +64,7 @@ component ActionButton inherits Rectangle {
     callback clicked();
     function activate() { if root.enabled { root.clicked(); } }
     property <color> foreground: !root.enabled ? #929cac : root.primary ? #ffffff
-        : root.destructive ? (root.icon-only && !hit.has-hover ? #8994a5 : #b94c56) : #3f4b5d;
+        : root.destructive ? (root.icon-only && !hit.has-hover ? #8994a5 : #b94c56) : root.accent ? #405bd1 : #3f4b5d;
     property <string> tip-text: root.shortcut == "" ? root.label : root.label + " · " + root.shortcut;
     height: 36px;
     min-width: root.icon-only ? root.icon-size + 17px : content.min-width;
@@ -212,6 +213,7 @@ component NoteEditor inherits Rectangle {
 component WindowButton inherits Rectangle {
     in property <int> kind: 0;
     in property <bool> restored: false;
+    in property <bool> attention: false;
     in property <string> description;
     callback clicked();
     width: 38px; height: 32px; border-radius: 7px;
@@ -226,6 +228,7 @@ component WindowButton inherits Rectangle {
     }
     if root.kind == 2 : Path { x: 13px; y: 10px; width: 12px; height: 12px; commands: "M 0 0 L 12 12 M 12 0 L 0 12"; stroke: hit.has-hover ? #ffffff : #586174; stroke-width: 1.5px; fill: transparent; }
     if root.kind == 3 : Text { x: 0px; y: 0px; width: parent.width; height: parent.height; text: "···"; color: #687386; font-size: 19px; horizontal-alignment: center; vertical-alignment: center; }
+    if root.kind == 3 && root.attention : Rectangle { x: 27px; y: 4px; width: 7px; height: 7px; border-radius: 4px; background: #4562e5; }
     hit := TouchArea { clicked => { root.clicked(); } }
 }
 
@@ -318,7 +321,7 @@ export component AppWindow inherits Window {
     out property <float> active-note-editor-y: root.active-note-state.editor-y / 1px;
     out property <bool> text-composing: root.has-active-note && root.active-note-state.composing;
     out property <bool> active-editor-focused: root.has-active-note
-        && root.active-note-state.focused && !root.confirm-visible && !root.busy;
+        && root.active-note-state.focused && !root.confirm-visible && !root.update-visible && !root.busy;
 
     property <NoteViewState> active-note-state;
     property <bool> has-active-note: root.active-note-token > 0
@@ -355,6 +358,50 @@ export component AppWindow inherits Window {
     in property <bool> copy-complete: false;
     callback dismiss-toast();
     callback resident-quit-requested();
+
+    // Update checks and downloads never share the editor's blocking worker.
+    in property <bool> update-available: false;
+    in property <bool> update-notice-visible: false;
+    in property <string> update-notice-title: "发现新版本";
+    in-out property <bool> update-visible: false;
+    // 1 checking, 2 available, 3 current, 4 check error, 5 downloading,
+    // 6 verifying, 7 ready, 8 download error, 9 cancelling.
+    in property <int> update-phase: 0;
+    in property <string> update-title;
+    in property <string> update-subtitle;
+    in property <string> update-detail;
+    in property <string> update-current-version;
+    in property <string> update-version;
+    in property <string> update-notes;
+    in property <bool> update-has-warning: false;
+    in property <bool> update-can-download: false;
+    in property <int> update-progress: 0;
+    in property <string> update-progress-label;
+    property <int> update-choice: 0;
+    out property <float> update-scroll-y: updateScroll.content-y / 1px;
+    out property <float> update-scroll-height: updateScroll.content-height / 1px;
+    out property <float> update-scroll-viewport: updateScroll.visible-height / 1px;
+    out property <float> update-cancel-x: (updateCancel.absolute-position.x + updateCancel.width / 2) / 1px;
+    out property <float> update-cancel-y: (updateCancel.absolute-position.y + updateCancel.height / 2) / 1px;
+    out property <bool> update-has-focus: updateKeys.has-focus;
+    callback update-check();
+    callback update-open();
+    callback update-dismiss();
+    callback update-primary();
+    callback update-secondary();
+    callback update-release-page();
+    callback update-dismiss-notice();
+    callback update-worker-event();
+    changed update-visible => {
+        if root.update-visible {
+            helpMenu.close(); about.close();
+            root.space-held = false; root.shift-held = false;
+            root.update-choice = 0;
+            updateKeys.focus();
+        } else if !root.confirm-visible {
+            if root.has-active-note { root.reveal-note(root.active-note-token); } else { canvasKeys.focus(); }
+        }
+    }
 
     in property <bool> confirm-visible: false;
     in property <string> confirm-title;
@@ -418,7 +465,7 @@ export component AppWindow inherits Window {
     public function canvas-accepts-scroll(x: float, y: float) -> bool {
         let local-x = x * 1px - canvasClip.absolute-position.x;
         let local-y = y * 1px - canvasClip.absolute-position.y;
-        return root.loaded && !root.busy && !root.confirm-visible && !root.text-composing
+        return root.loaded && !root.busy && !root.confirm-visible && !root.update-visible && !root.text-composing
             && local-x >= 0px && local-y >= 0px && local-x < canvasClip.width && local-y < canvasClip.height
             && !(local-x >= zoomControls.x - 42px && local-x <= zoomControls.x + zoomControls.width
                 && local-y >= zoomControls.y && local-y <= zoomControls.y + zoomControls.height);
@@ -437,7 +484,7 @@ export component AppWindow inherits Window {
         width: parent.width;
         height: parent.height;
         capture-key-pressed(event) => {
-            if root.confirm-visible || root.busy || root.text-composing { return reject; }
+            if root.confirm-visible || root.update-visible || root.busy || root.text-composing { return reject; }
             if event.modifiers.control && !event.modifiers.alt && !event.modifiers.meta {
                 if event.text.to-lowercase() == "z" {
                     if event.modifiers.shift { root.redo(); } else { root.undo(); }
@@ -452,13 +499,15 @@ export component AppWindow inherits Window {
             return reject;
         }
     helpMenu := PopupWindow {
-        x: root.width - 230px; y: root.native-chrome ? 62px : 42px; width: 216px; height: 232px;
+        x: root.width - 230px; y: root.native-chrome ? 62px : 42px; width: 216px; height: root.update-available ? 320px : 276px;
         Rectangle { x: 0px; y: 0px; width: parent.width; height: parent.height; border-radius: 9px; border-width: 1px; border-color: #dfe3ed; background: #ffffff;
             ActionButton { x: 7px; y: 8px; width: 182px; height: 40px; label: "复制原图路径"; quiet: true; enabled: root.loaded && !root.busy && !root.text-composing; clicked => { helpMenu.close(); root.copy-original-path(); } }
             ActionButton { x: 7px; y: 52px; width: 202px; height: 40px; label: "复制 Base64 便携数据"; quiet: true; enabled: root.loaded && !root.busy && !root.text-composing; clicked => { helpMenu.close(); root.copy-portable-data(); } }
             ActionButton { x: 7px; y: 96px; width: 202px; height: 40px; label: "打开最近图片快照"; quiet: true; enabled: root.delivery-ready && !root.busy; clicked => { helpMenu.close(); root.open-feedback-folder(); } }
             ActionButton { x: 7px; y: 140px; width: 202px; height: 40px; label: root.smart-enabled ? "智能预选：开" : "智能预选：关"; quiet: true; enabled: !root.busy && !root.text-composing; clicked => { helpMenu.close(); root.toggle-smart(); } }
-            ActionButton { x: 7px; y: 184px; width: 202px; height: 40px; label: "关于图片反馈"; quiet: true; clicked => { helpMenu.close(); about.show(); } }
+            ActionButton { x: 7px; y: 184px; width: 202px; height: 40px; label: "检查更新"; quiet: true; enabled: !root.busy && !root.text-composing; clicked => { helpMenu.close(); root.update-check(); } }
+            ActionButton { x: 7px; y: 228px; width: 202px; height: 40px; label: "关于图片反馈"; quiet: true; clicked => { helpMenu.close(); about.show(); } }
+            if root.update-available : ActionButton { x: 7px; y: 272px; width: 202px; height: 40px; label: "查看新版本 " + root.update-version; quiet: true; enabled: !root.busy && !root.text-composing; clicked => { helpMenu.close(); root.update-open(); } }
         }
     }
     about := PopupWindow {
@@ -485,7 +534,7 @@ export component AppWindow inherits Window {
         Image { x: 16px; y: 10px; width: 24px; height: 24px; source: @image-url("../assets/app-icon.png"); image-fit: contain; }
         Text { x: 49px; y: 12px; width: 130px; height: 22px; text: "图片反馈"; font-size: 13px; font-weight: 600; color: #344055; }
         Text { x: 190px; y: 12px; width: parent.width - 392px; height: 21px; visible: root.loaded; text: root.image-name; font-size: 12px; color: #838b9d; horizontal-alignment: center; overflow: elide; }
-        WindowButton { x: parent.width - 176px; y: 6px; kind: 3; description: "帮助菜单"; clicked => { helpMenu.show(); } }
+        WindowButton { x: parent.width - 176px; y: 6px; kind: 3; attention: root.update-available; description: root.update-available ? "帮助菜单，有新版本" : "帮助菜单"; clicked => { helpMenu.show(); } }
         WindowButton { x: parent.width - 132px; y: 6px; kind: 0; description: "最小化窗口"; clicked => { root.minimized = true; } }
         WindowButton { x: parent.width - 88px; y: 6px; kind: 1; restored: root.maximized; description: root.maximized ? "还原窗口" : "最大化窗口"; clicked => { root.maximized = !root.maximized; } }
         closeWindow := WindowButton { x: parent.width - 44px; y: 6px; kind: 2; description: "关闭窗口"; clicked => { root.close(); } }
@@ -506,8 +555,14 @@ export component AppWindow inherits Window {
                 ActionButton { width: 36px; label: "撤销"; icon: @image-url("../assets/icons/undo.svg"); icon-only: true; quiet: true; shortcut: root.native-chrome ? "⌘Z" : "Ctrl+Z"; enabled: root.can-undo && !root.busy && !root.text-composing; clicked => { root.undo(); } }
                 ActionButton { width: 36px; label: "重做"; icon: @image-url("../assets/icons/redo.svg"); icon-only: true; quiet: true; shortcut: root.native-chrome ? "⇧⌘Z" : "Ctrl+Shift+Z / Ctrl+Y"; enabled: root.can-redo && !root.busy && !root.text-composing; clicked => { root.redo(); } }
             }
+            if root.update-notice-visible : Rectangle {
+                width: 225px; height: 34px; horizontal-stretch: 0;
+                border-radius: 8px; border-width: 1px; border-color: #dbe2ff; background: #f5f7ff;
+                ActionButton { x: 4px; y: 1px; width: 183px; height: 32px; label: root.update-notice-title; quiet: true; enabled: !root.busy && !root.text-composing; clicked => { root.update-open(); } }
+                ActionButton { x: 188px; y: 1px; width: 32px; height: 32px; label: "稍后查看更新"; icon: @image-url("../assets/icons/close.svg"); icon-size: 14px; icon-only: true; quiet: true; clicked => { root.update-dismiss-notice(); } }
+            }
             Rectangle { min-width: 0px; horizontal-stretch: 1; }
-            if root.native-chrome : WindowButton { kind: 3; description: "更多菜单"; clicked => { helpMenu.show(); } }
+            if root.native-chrome : WindowButton { kind: 3; attention: root.update-available; description: root.update-available ? "更多菜单，有新版本" : "更多菜单"; clicked => { helpMenu.show(); } }
         }
         Rectangle { x: 0px; y: 63px; width: parent.width; height: 1px; background: #e3e7ed; }
     }
@@ -1180,6 +1235,137 @@ export component AppWindow inherits Window {
         }
     }
     Rectangle { x: 0px; y: 0px; width: parent.width; height: parent.height; background: transparent; border-color: #dfe3eb; border-width: 1px; }
+
+    // The update dialog is shown only after an explicit user action. Background
+    // checks and downloads do not take focus or block the current editing session.
+    updateOverlay := Rectangle {
+        x: 0px; y: 0px; width: root.width; height: root.height;
+        visible: root.update-visible && !root.confirm-visible;
+        background: #17213c77;
+        TouchArea {
+            enabled: root.update-visible && !root.confirm-visible;
+            pointer-event(event) => { if event.kind == PointerEventKind.down { updateKeys.focus(); } }
+            scroll-event(event) => { return accept; }
+        }
+        updateKeys := FocusScope {
+            x: 0px; y: 0px; width: parent.width; height: parent.height;
+            enabled: root.update-visible && !root.confirm-visible;
+            property <int> max-choice: root.update-phase == 2 ? 3
+                : (root.update-phase == 1 || root.update-phase == 3 || root.update-phase == 9 ? 0
+                    : (root.update-phase == 5 || root.update-phase == 6 ? 1 : 2));
+            capture-key-pressed(event) => {
+                if event.text == Key.Escape { root.update-dismiss(); return accept; }
+                if event.text == Key.Tab || event.text == Key.Backtab {
+                    if event.text == Key.Backtab || event.modifiers.shift {
+                        root.update-choice = root.update-choice <= 0 ? self.max-choice : root.update-choice - 1;
+                    } else {
+                        root.update-choice = root.update-choice >= self.max-choice ? 0 : root.update-choice + 1;
+                    }
+                    return accept;
+                }
+                if root.update-phase == 2 && root.update-choice == 3 {
+                    if event.text == Key.Home { updateScroll.content-y = 0px; return accept; }
+                    if event.text == Key.End { updateScroll.content-y = min(0px, updateScroll.visible-height - updateScroll.content-height); return accept; }
+                    if event.text == Key.UpArrow || event.text == Key.PageUp {
+                        updateScroll.content-y = min(0px, updateScroll.content-y + (event.text == Key.PageUp ? updateScroll.visible-height * 0.8 : 48px));
+                        return accept;
+                    }
+                    if event.text == Key.DownArrow || event.text == Key.PageDown || event.text == " " {
+                        updateScroll.content-y = max(min(0px, updateScroll.visible-height - updateScroll.content-height), updateScroll.content-y - (event.text == Key.PageDown ? updateScroll.visible-height * 0.8 : 48px));
+                        return accept;
+                    }
+                }
+                if event.text == Key.Return || event.text == " " {
+                    if root.update-choice == 0 { root.update-dismiss(); }
+                    if root.update-choice == 1 { root.update-secondary(); }
+                    if root.update-choice == 2 { root.update-primary(); }
+                    return accept;
+                }
+                return accept;
+            }
+            capture-key-released(event) => { return accept; }
+            updateCard := Rectangle {
+                x: (parent.width - self.width) / 2; y: (parent.height - self.height) / 2;
+                width: 520px; height: root.update-phase == 2 ? 552px : 330px;
+                border-radius: 17px; border-width: 1px; border-color: #e3e6f0; background: #ffffff;
+                accessible-role: groupbox; accessible-label: root.update-title;
+                Rectangle { x: 28px; y: 27px; width: 48px; height: 48px; border-radius: 12px; background: #eef1ff;
+                    if root.update-phase == 3 || root.update-phase == 7 : Path { x: 13px; y: 15px; width: 22px; height: 17px; commands: "M 1 8 L 8 15 L 21 1"; stroke: #4562e5; stroke-width: 2px; fill: transparent; }
+                    if root.update-phase != 3 && root.update-phase != 7 : Path { x: 15px; y: 12px; width: 18px; height: 23px; commands: "M 9 22 V 1 M 2 8 L 9 1 L 16 8"; stroke: #4562e5; stroke-width: 2px; fill: transparent; }
+                }
+                Text { x: 91px; y: 27px; width: 360px; height: 27px; text: root.update-title; color: #273449; font-size: 19px; font-weight: 600; overflow: elide; }
+                Text { x: 91px; y: 55px; width: 360px; height: 22px; text: root.update-subtitle; color: #596a7e; font-size: 13px; overflow: elide; }
+                ActionButton { x: parent.width - 46px; y: 15px; width: 30px; height: 30px; label: "关闭更新窗口"; icon: @image-url("../assets/icons/close.svg"); icon-size: 14px; icon-only: true; quiet: true; clicked => { root.update-dismiss(); } }
+                if root.update-phase == 2 : Rectangle {
+                    x: 28px; y: 96px; width: parent.width - 56px; height: 62px;
+                    border-radius: 8px; border-width: 1px; border-color: #e5e9f1; background: #f7f8fb;
+                    Text { x: 14px; y: 9px; text: "当前版本"; color: #637086; font-size: 12px; }
+                    Text { x: 14px; y: 29px; text: root.update-current-version; color: #273449; font-size: 14px; font-weight: 600; }
+                    Text { x: 113px; y: 22px; text: "→"; color: #8995a7; font-size: 16px; }
+                    Text { x: 150px; y: 9px; text: "可用版本"; color: #637086; font-size: 12px; }
+                    Text { x: 150px; y: 29px; text: root.update-version; color: #273449; font-size: 14px; font-weight: 600; }
+                }
+                if root.update-phase == 2 && root.update-has-warning : Rectangle {
+                    x: 28px; y: 168px; width: parent.width - 56px; height: 34px;
+                    border-radius: 7px; border-width: 1px; border-color: #f0dfbf; background: #fffbf2;
+                    Text { x: 11px; y: 8px; text: "!  本次包含重要升级提醒"; color: #72512e; font-size: 12px; font-weight: 600; }
+                    ActionButton { x: parent.width - 92px; y: 1px; width: 88px; height: 31px; label: "查看提醒"; quiet: true; clicked => { updateScroll.content-y = 0px; root.update-choice = 3; updateKeys.focus(); } }
+                }
+                if root.update-phase == 2 : Text { x: 28px; y: root.update-has-warning ? 212px : 172px; text: "本次更新"; color: #354257; font-size: 13px; font-weight: 600; }
+                updateScroll := ScrollView {
+                    x: 28px; y: root.update-has-warning ? 235px : 195px;
+                    width: parent.width - 56px; height: root.update-has-warning ? 175px : 215px;
+                    visible: root.update-phase == 2;
+                    content-width: self.width - 16px;
+                    VerticalLayout {
+                        padding: 10px;
+                        Text { text: root.update-notes; color: #526075; font-size: 13px; line-height-factor: 1.45; wrap: word-wrap; }
+                    }
+                }
+                if root.update-phase == 2 : Rectangle {
+                    x: 28px; y: root.update-has-warning ? 235px : 195px;
+                    width: parent.width - 56px; height: root.update-has-warning ? 175px : 215px;
+                    border-radius: 7px; border-width: root.update-choice == 3 && updateKeys.has-focus ? 2px : 1px;
+                    border-color: root.update-choice == 3 && updateKeys.has-focus ? #7085eb : #e4e9f1; background: transparent;
+                }
+                if root.update-phase == 2 && updateScroll.content-height > updateScroll.visible-height + 1px : Text {
+                    x: 30px; y: 412px; width: parent.width - 60px; height: 16px;
+                    text: updateScroll.content-y <= updateScroll.visible-height - updateScroll.content-height + 1px ? "已到更新说明末尾" : "向下滚动查看完整说明";
+                    color: #637086; font-size: 11px;
+                }
+                if root.update-phase == 2 : ActionButton { x: 28px; y: 429px; width: 178px; height: 32px; label: "查看完整更新说明 ↗"; quiet: true; accent: true; focus-ring: updateKeys.has-focus && root.update-choice == 1; clicked => { root.update-release-page(); } }
+                if root.update-phase != 2 : Text {
+                    x: 28px; y: 105px; width: parent.width - 56px; height: 90px;
+                    text: root.update-detail; color: #526075; font-size: 13px; line-height-factor: 1.4; wrap: word-wrap;
+                }
+                if root.update-phase == 5 || root.update-phase == 6 || root.update-phase == 9 : Rectangle {
+                    x: 28px; y: 202px; width: parent.width - 56px; height: 7px; border-radius: 4px; background: #e8edf4;
+                    Rectangle { width: parent.width * min(100, max(0, root.update-progress)) / 100; height: parent.height; border-radius: 4px; background: #4562e5; }
+                    Text { x: 0px; y: 15px; width: parent.width; height: 20px; text: root.update-progress-label; color: #637086; font-size: 12px; }
+                }
+                Rectangle { x: 28px; y: parent.height - 73px; width: parent.width - 56px; height: 1px; background: #edf0f4; }
+                updateCancel := ActionButton {
+                    x: 28px; y: parent.height - 57px; width: 100px; height: 38px;
+                    label: root.update-phase == 5 || root.update-phase == 6 || root.update-phase == 9 ? "后台进行" : (root.update-phase == 2 || root.update-phase == 7 ? "稍后提醒" : "关闭");
+                    focus-ring: updateKeys.has-focus && root.update-choice == 0;
+                    clicked => { root.update-dismiss(); }
+                }
+                if root.update-phase == 4 || root.update-phase == 5 || root.update-phase == 6 || root.update-phase == 7 || root.update-phase == 8 : ActionButton {
+                    x: 137px; y: parent.height - 57px; width: 112px; height: 38px;
+                    label: root.update-phase == 5 || root.update-phase == 6 ? "取消下载" : "发行页";
+                    focus-ring: updateKeys.has-focus && root.update-choice == 1;
+                    clicked => { root.update-secondary(); }
+                }
+                if root.update-phase == 2 || root.update-phase == 4 || root.update-phase == 7 || root.update-phase == 8 : ActionButton {
+                    x: parent.width - 174px; y: parent.height - 57px; width: 146px; height: 38px; primary: true;
+                    label: root.update-phase == 2 ? (root.update-can-download ? "下载更新" : "打开发行页")
+                        : root.update-phase == 7 ? "打开所在位置" : "重试";
+                    focus-ring: updateKeys.has-focus && root.update-choice == 2;
+                    clicked => { root.update-primary(); }
+                }
+            }
+        }
+    }
 
     // Keep this layer and its FocusScope instantiated: visibility and enabled gate
     // all input while preserving stable IDs for focus transitions and UI tests.

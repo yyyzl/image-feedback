@@ -44,10 +44,10 @@ assert report["result"]=="passed",report
 assert report["native_template_checked"] and report["template_expected"],report
 assert report["pixel_dimensions"]==[36,36],report
 PY
-for MODE in smoke-test delivery-smoke dialog-smoke ui-smoke; do
+for MODE in smoke-test delivery-smoke dialog-smoke ui-smoke update-smoke; do
   DIR="$OUTPUT/$MODE"
   SLINT_BACKEND=winit-software "$BIN" --editor "--$MODE" "$DIR"
-  case "$MODE" in smoke-test) REPORT=smoke-report.json;; delivery-smoke) REPORT=delivery-report.json;; dialog-smoke) REPORT=dialog-report.json;; ui-smoke) REPORT=ui-report.json;; esac
+  case "$MODE" in smoke-test) REPORT=smoke-report.json;; delivery-smoke) REPORT=delivery-report.json;; dialog-smoke) REPORT=dialog-report.json;; ui-smoke) REPORT=ui-report.json;; update-smoke) REPORT=update-report.json;; esac
   test -s "$DIR/$REPORT"
   python3 -c 'import json,sys;d=json.load(open(sys.argv[1]));assert d["result"]=="passed",d' "$DIR/$REPORT"
 done

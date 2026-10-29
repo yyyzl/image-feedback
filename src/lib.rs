@@ -3,3 +3,4 @@ pub mod delivery;
 pub mod document;
 pub mod smart_selection;
 pub mod storage;
+pub mod update;

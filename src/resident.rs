@@ -409,6 +409,13 @@ pub fn run(open_initially: bool) -> Result<(), Box<dyn Error>> {
             let _ = proxy.send_event(Event::Open);
         }
     }));
+    let update_stop = if smoke_output.is_none() && quit_smoke.is_none() {
+        Some(image_feedback_slint::update::start_resident_checks(
+            super::app_dir(),
+        ))
+    } else {
+        None
+    };
     let mut app = Resident {
         tray: None,
         open: None,
@@ -424,7 +431,11 @@ pub fn run(open_initially: bool) -> Result<(), Box<dyn Error>> {
         quit_smoke,
         error: None,
     };
-    events.run_app(&mut app)?;
+    let event_result = events.run_app(&mut app);
+    if let Some(stop) = update_stop {
+        stop.store(true, std::sync::atomic::Ordering::Relaxed);
+    }
+    event_result?;
     // The editor is never killed: exit only follows a clean close or explicit discard.
     if let Some(err) = app.error {
         return Err(err.into());
