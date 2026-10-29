@@ -54,7 +54,7 @@ Name: "{userdesktop}\Image Feedback"; Filename: "{app}\ImageFeedback.exe"; Worki
 Root: HKCU; Subkey: "Software\Microsoft\Windows\CurrentVersion\App Paths\ImageFeedback.exe"; ValueType: string; ValueName: ""; ValueData: "{app}\ImageFeedback.exe"; Flags: uninsdeletekey
 
 [Run]
-Filename: "{app}\ImageFeedback.exe"; Description: "Launch Image Feedback"; Flags: nowait postinstall skipifsilent
+Filename: "{app}\ImageFeedback.exe"; Parameters: "--after-update-install"; Description: "Launch Image Feedback"; Flags: nowait postinstall skipifsilent
 
 [Code]
 // Remove only this app's obsolete association when upgrading; leave existing .ifp files untouched.

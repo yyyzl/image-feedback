@@ -40,13 +40,23 @@ impl Drop for InstallationGuard {
         }
     }
 }
+/// Debug integration tests isolate both app-data and the running mutex. Release
+/// builds always use the installer contract's fixed mutex name.
+#[cfg(windows)]
+pub fn running_mutex_name() -> String {
+    #[cfg(debug_assertions)]
+    if let Ok(id) = std::env::var("IMAGE_FEEDBACK_TEST_INSTANCE") {
+        if id.len() == 32 && id.bytes().all(|b| b.is_ascii_hexdigit()) {
+            return format!("Local\\ImageFeedback.Test.{id}");
+        }
+    }
+    "Local\\ImageFeedback.Running".into()
+}
+
 /// Both tray and editor keep a reference. The installer never forcibly ends either process.
 #[cfg(windows)]
 pub fn installation_guard() -> Option<InstallationGuard> {
-    let name: Vec<u16> = "Local\\ImageFeedback.Running"
-        .encode_utf16()
-        .chain(Some(0))
-        .collect();
+    let name: Vec<u16> = running_mutex_name().encode_utf16().chain(Some(0)).collect();
     let handle = unsafe { CreateMutexW(core::ptr::null_mut(), 0, name.as_ptr()) };
     if handle.is_null() {
         None

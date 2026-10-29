@@ -256,6 +256,33 @@ fn new_workspace_clears_editing_state_but_preserves_files_and_preferences() {
 }
 
 #[test]
+fn update_install_uses_the_same_guard_and_preserves_drafts_on_cancel_or_failure() {
+    let mut e = editor();
+    let before = e.doc().unwrap().clone();
+    e.pending = Some((1, "字".repeat(20_001)));
+    let action = PendingAction::InstallUpdate(image_feedback_slint::update::VerifiedDownload {
+        path: PathBuf::from("not-an-executable"),
+        sha256: "0".repeat(64),
+        size: 1,
+    });
+    assert!(e.request_action(action.clone()).is_none());
+    assert_eq!(e.confirmation.as_ref().unwrap().action, action);
+    e.cancel_confirmation();
+    assert_eq!(e.doc(), Some(&before));
+    assert_eq!(e.pending.as_ref().unwrap().1.chars().count(), 20_001);
+    assert!(e.worker.is_none());
+    e.request_action(action.clone());
+    assert_eq!(e.discard_confirmation(), Some(action.clone()));
+    // Confirming authorizes the handoff, but does not erase anything before preflight.
+    assert_eq!(e.doc(), Some(&before));
+    assert!(e.pending.is_some());
+    let (_tx, rx) = mpsc::channel();
+    e.worker = Some(rx);
+    assert!(e.request_action(action).is_none());
+    assert!(e.confirmation.is_none());
+}
+
+#[test]
 fn new_is_blocked_while_a_background_task_is_active() {
     let mut e = editor();
     let before = e.doc().unwrap().clone();

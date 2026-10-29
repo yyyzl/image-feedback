@@ -38,6 +38,12 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           cargo test --release --locked
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Offline update handoff regression
+        run: |
+          cargo build --locked
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          python scripts/test-update-handoff.py
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - name: Verified Inno Setup compiler
         run: ./scripts/install-inno.ps1
       - name: Self-contained static-CRT installer
@@ -60,6 +66,7 @@ jobs:
           path: |
             artifacts/windows-install
             artifacts/windows-tray-quit
+            artifacts/update-handoff
           if-no-files-found: warn
 
   macos:

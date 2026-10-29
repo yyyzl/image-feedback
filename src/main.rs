@@ -31,6 +31,7 @@ mod quit_ipc;
 mod resident;
 mod smoke_ready;
 mod transform_smoke;
+mod update_install;
 mod update_smoke;
 mod update_ui;
 
@@ -111,6 +112,7 @@ struct DeliveryCache {
     source: Option<PathBuf>,
 }
 enum Work {
+    InstallPrepared(Result<update_install::Prepared, String>),
     Loaded(Result<(Document, Asset, RgbaImage), String>),
     Delivered(
         Result<(DeliveryCache, Result<String, String>), String>,
@@ -120,6 +122,7 @@ enum Work {
 #[derive(Clone, Debug, PartialEq)]
 enum PendingAction {
     Close,
+    InstallUpdate(image_feedback_slint::update::VerifiedDownload),
     New,
     Load { path: PathBuf },
     Demo { annotated: bool },
@@ -837,7 +840,11 @@ fn sync_confirmation(ui: &AppWindow, e: &Editor) {
         );
         ui.set_confirm_visible(true);
     } else if let Some(c) = e.confirmation.as_ref() {
+        let installing = matches!(c.action, PendingAction::InstallUpdate(_));
         let closing = matches!(c.action, PendingAction::Close);
+        if installing {
+            ui.set_confirm_cancel_label("返回编辑".into());
+        }
         let starting_new = matches!(c.action, PendingAction::New);
         let exiting_app = closing && e.resident_quit_reply.is_some();
         ui.set_confirm_show_cancel(true);
@@ -846,7 +853,9 @@ fn sync_confirmation(ui: &AppWindow, e: &Editor) {
             ui.set_confirm_choice(0);
         }
         ui.set_confirm_title(
-            if exiting_app {
+            if installing {
+                "还有未保留的反馈"
+            } else if exiting_app {
                 "退出图片反馈？"
             } else if closing {
                 "关闭当前图片？"
@@ -858,7 +867,9 @@ fn sync_confirmation(ui: &AppWindow, e: &Editor) {
             .into(),
         );
         ui.set_confirm_description(
-            if exiting_app {
+            if installing {
+                "安装更新需要退出图片反馈。退出后将无法继续编辑当前批注，原图不会改变。"
+            } else if exiting_app {
                 "退出后将无法继续编辑当前批注，原图不会改变。"
             } else if closing {
                 "关闭后将无法继续编辑当前批注，原图不会改变。"
@@ -877,7 +888,9 @@ fn sync_confirmation(ui: &AppWindow, e: &Editor) {
         );
         ui.set_confirm_footnote("请先复制需要保留的反馈。".into());
         ui.set_confirm_primary_label(
-            if exiting_app {
+            if installing {
+                "仍要退出并安装"
+            } else if exiting_app {
                 "退出并丢弃"
             } else if closing {
                 "关闭并丢弃"
@@ -1217,6 +1230,12 @@ fn reconcile_note_rows(model: &VecModel<NoteRow>, rows: Vec<NoteRow>) {
 }
 fn perform_action(ui: &AppWindow, e: &mut Editor, timer: &Rc<slint::Timer>, action: PendingAction) {
     match action {
+        PendingAction::InstallUpdate(package) => {
+            ui.invoke_update_install_started();
+            start_work(ui, e, timer, move || {
+                Work::InstallPrepared(update_install::prepare(package, app_dir()))
+            });
+        }
         PendingAction::Close => {
             let _ = ui.hide();
         }
@@ -1256,6 +1275,25 @@ fn begin_action(ui: &AppWindow, e: &mut Editor, timer: &Rc<slint::Timer>, action
         sync_confirmation(ui, e);
     }
 }
+fn request_update_install(
+    ui: &AppWindow,
+    e: &mut Editor,
+    timer: &Rc<slint::Timer>,
+    package: image_feedback_slint::update::VerifiedDownload,
+) {
+    if ui.get_text_composing()
+        || e.worker.is_some()
+        || e.confirmation.is_some()
+        || e.message.is_some()
+    {
+        set_status(ui, "请先完成当前操作，再安装更新");
+        return;
+    }
+    ui.set_update_visible(false);
+    ui.set_update_notice_visible(true);
+    begin_action(ui, e, timer, PendingAction::InstallUpdate(package));
+}
+
 fn request_resident_quit(
     ui: &AppWindow,
     e: &mut Editor,
@@ -1897,7 +1935,8 @@ fn run_editor(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
     let activation_server = platform::start_activation_server(ui.as_weak())?;
     let editor = Rc::new(RefCell::new(Editor {
         clipboard_probe: args.iter().any(|arg| {
-            (cfg!(debug_assertions) && arg == "--native-pointer-probe")
+            (cfg!(debug_assertions)
+                && (arg == "--native-pointer-probe" || arg == "--update-offline-test"))
                 || arg == "--smoke-test"
                 || arg == "--dialog-smoke"
                 || arg == "--delivery-smoke"
@@ -1908,7 +1947,21 @@ fn run_editor(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
     }));
     let timer = Rc::new(slint::Timer::default());
     let toast_timer = Rc::new(slint::Timer::default());
-    let update_timer = update_ui::install(&ui, app_dir(), !editor.borrow().clipboard_probe);
+    let update_timer = {
+        let state = editor.clone();
+        let weak = ui.as_weak();
+        let t = timer.clone();
+        update_ui::install(
+            &ui,
+            app_dir(),
+            !editor.borrow().clipboard_probe,
+            move |package| {
+                if let Some(ui) = weak.upgrade() {
+                    request_update_install(&ui, &mut state.borrow_mut(), &t, package);
+                }
+            },
+        )
+    };
     let (quit_requests, quit_receiver) = mpsc::channel();
     {
         let weak = ui.as_weak();
@@ -2115,6 +2168,19 @@ fn run_editor(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
                         t.stop();
                         ui.set_busy(false);
                         match work {
+                            Work::InstallPrepared(result) => {
+                                match result.and_then(update_install::Prepared::commit) {
+                                    Ok(()) => {
+                                        // The helper cannot launch until this process and the tray exit.
+                                        if let Err(error) = ui.hide() {
+                                            ui.invoke_update_install_failed(
+                                                error.to_string().into(),
+                                            );
+                                        }
+                                    }
+                                    Err(error) => ui.invoke_update_install_failed(error.into()),
+                                }
+                            }
                             Work::Loaded(Ok((d, a, thumb))) => install(&ui, &mut e, d, a, thumb),
                             Work::Loaded(Err(err)) => {
                                 set_status(&ui, format!("读取失败：{err}"));
@@ -2129,6 +2195,11 @@ fn run_editor(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
                         e.worker = None;
                         t.stop();
                         ui.set_busy(false);
+                        if ui.get_update_phase() == 10 {
+                            ui.invoke_update_install_failed(
+                                "安装准备异常结束，应用未退出，请重试。".into(),
+                            );
+                        }
                         show_message(
                             &ui,
                             &mut e,
@@ -3095,6 +3166,7 @@ fn run_editor(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
             .get(index + 1)
             .map(PathBuf::from)
             .unwrap_or_else(|| PathBuf::from("artifacts/update-smoke"));
+        let updates = update_timer.clone();
         let state = editor.clone();
         let failure = smoke_result.clone();
         smoke_ready::start(
@@ -3104,7 +3176,7 @@ fn run_editor(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
             failure.clone(),
             Duration::from_secs(2),
             move |ui| {
-                update_smoke::start(ui, state, folder, failure);
+                update_smoke::start(ui, state, folder, failure, updates);
             },
         );
     }
@@ -3209,13 +3281,42 @@ fn main() {
         println!("Image Feedback {}", env!("CARGO_PKG_VERSION"));
         return;
     }
+    if args.iter().any(|arg| arg == "--install-update-helper") {
+        if let Err(error) = update_install::run_helper() {
+            use std::io::Write;
+            println!("ERROR {}", error.replace(['\r', '\n'], " "));
+            let _ = std::io::stdout().flush();
+        }
+        return;
+    }
     // Before any worker/event-loop threads exist; inherited by the editor child.
     if args.iter().any(|arg| arg == "--software-rendering") {
         unsafe {
             std::env::set_var("SLINT_BACKEND", "winit-software");
         }
     }
+    let startup_deadline = std::time::Instant::now() + Duration::from_secs(25);
+    let after_install = args.iter().any(|a| a == "--after-update-install");
+    let startup_gate = loop {
+        match update_install::startup_gate(&app_dir()) {
+            Ok(Some(gate)) => break gate,
+            Ok(None) if after_install && std::time::Instant::now() < startup_deadline => {
+                // Inno launches with nowait after copying files, then exits. Wait
+                // for the helper to release its gate before creating AppMutex.
+                std::thread::sleep(Duration::from_millis(100));
+            }
+            Ok(None) => {
+                eprintln!("更新安装正在进行，请稍候再打开应用");
+                return;
+            }
+            Err(error) => {
+                eprintln!("无法检查更新交接状态：{error}");
+                return;
+            }
+        }
+    };
     let _installation_guard = platform::installation_guard();
+    drop(startup_gate);
     let smoke = args.iter().any(|a| {
         a == "--smoke-test"
             || a == "--dialog-smoke"

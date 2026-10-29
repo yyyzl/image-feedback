@@ -2533,7 +2533,7 @@ dependencies = [
 
 [[package]]
 name = "image-feedback-slint"
-version = "0.2.3"
+version = "0.2.4"
 dependencies = [
  "arboard",
  "base64 0.22.1",

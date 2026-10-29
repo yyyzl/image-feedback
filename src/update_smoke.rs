@@ -19,6 +19,7 @@ pub(super) fn start(
     state: Rc<RefCell<Editor>>,
     folder: PathBuf,
     failure: Rc<RefCell<Option<String>>>,
+    updates: Rc<update_ui::UpdateHandle>,
 ) {
     let setup = (|| -> Result<(), String> {
         std::fs::create_dir_all(&folder).map_err(|e| e.to_string())?;
@@ -110,24 +111,132 @@ pub(super) fn start(
             if ui.get_confirm_visible() || state.borrow().doc() != Some(&before) {
                 return Err("cancelling close did not preserve feedback".into());
             }
-            ui.set_update_phase(7);
-            ui.set_update_title("安装包已准备好".into());
-            ui.set_update_subtitle("由你决定何时安装。".into());
-            ui.set_update_detail("安装包已通过完整性校验，但不能确认发布者身份。先复制需要保留的反馈并退出编辑器及托盘，再手动运行安装程序；请留意系统发布者提示。".into());
+            ui.set_update_phase(5);
+            ui.set_update_progress(17);
+            ui.set_update_title("正在下载更新".into());
+            ui.set_update_subtitle("关闭此窗口后可继续编辑。".into());
+            ui.set_update_detail("下载将在后台继续；退出编辑器会中断下载。".into());
+            ui.set_update_progress_label("1.5 MB / 8.6 MB · 17%".into());
             ui.set_update_visible(true);
+            if ui.get_update_progress_fill_x().abs() > 0.1 {
+                return Err("download progress must start at the left edge".into());
+            }
+            save_window_snapshot(&ui, &folder.join("update-downloading.png"))?;
+            ui.set_update_visible(false);
+            updates.seed_smoke_ready(&ui, folder.join("missing-package-never-execute.exe"));
             save_window_snapshot(&ui, &folder.join("update-ready.png"))?;
-            let report = serde_json::json!({"result":"passed","platform":std::env::consts::OS,"method":"native Slint window with scene-dispatched keyboard and close events; mock release metadata, no network or installer","checks":["long release notes scroll within the dialog","keyboard focus and scrolling","closing update dialog keeps annotations","normal close still invokes existing feedback protection","cancelling close retains feedback","manual installation guidance"],"scroll_content":content,"scroll_viewport":viewport,"images":["update-long.png","update-scrolled.png","update-ready.png"]});
-            std::fs::write(
-                folder.join("update-report.json"),
-                serde_json::to_vec_pretty(&report).map_err(|e| e.to_string())?,
-            )
-            .map_err(|e| e.to_string())?;
+            ui.invoke_update_dismiss();
+            if ui.get_update_visible() || !ui.get_update_notice_visible() {
+                return Err("install later must retain the ready notice".into());
+            }
+            save_window_snapshot(&ui, &folder.join("update-later.png"))?;
+            ui.invoke_update_check();
+            if ui.get_update_phase() != 7 {
+                return Err("manual check replaced a ready update".into());
+            }
+            if cfg!(windows) {
+                ui.invoke_update_primary();
+                if !ui.get_confirm_visible() || ui.get_confirm_primary_label() != "仍要退出并安装"
+                {
+                    return Err("install did not invoke the feedback guard".into());
+                }
+                save_window_snapshot(&ui, &folder.join("update-guard.png"))?;
+                ui.invoke_confirm_response(0);
+                if ui.get_confirm_visible()
+                    || state.borrow().doc() != Some(&before)
+                    || state.borrow().worker.is_some()
+                {
+                    return Err("cancelling install changed feedback or started the helper".into());
+                }
+                ui.invoke_update_open();
+                ui.invoke_update_primary();
+                ui.invoke_confirm_response(2);
+                if ui.get_update_phase() != 10 || !ui.get_busy() {
+                    return Err("confirmed install did not start preflight".into());
+                }
+                ui.invoke_update_dismiss();
+                if !ui.get_update_visible() {
+                    return Err("preflight could be dismissed while exit was pending".into());
+                }
+            }
             Ok(())
         })();
         if let Err(error) = result {
             fail(&ui, &folder, &failure, error);
             return;
         }
-        let _ = ui.hide();
+        if cfg!(windows) {
+            wait_for_preflight_failure(&ui, state, folder, failure, 0);
+        } else {
+            finish(&ui, &folder, &failure, false);
+        }
     });
+}
+
+fn wait_for_preflight_failure(
+    ui: &AppWindow,
+    state: Rc<RefCell<Editor>>,
+    folder: PathBuf,
+    failure: Rc<RefCell<Option<String>>>,
+    attempts: u32,
+) {
+    if ui.get_update_phase() == 11 && state.borrow().worker.is_none() {
+        if !state.borrow().has_feedback() || !ui.get_update_visible() || ui.get_busy() {
+            fail(
+                ui,
+                &folder,
+                &failure,
+                "failed installation did not preserve a usable editor".into(),
+            );
+            return;
+        }
+        if let Err(error) = save_window_snapshot(ui, &folder.join("update-install-error.png")) {
+            fail(ui, &folder, &failure, error);
+            return;
+        }
+        finish(ui, &folder, &failure, true);
+        return;
+    }
+    if attempts >= 400 {
+        fail(
+            ui,
+            &folder,
+            &failure,
+            "installation preflight failure timed out".into(),
+        );
+        return;
+    }
+    let weak = ui.as_weak();
+    slint::Timer::single_shot(Duration::from_millis(100), move || {
+        if let Some(ui) = weak.upgrade() {
+            wait_for_preflight_failure(&ui, state, folder, failure, attempts + 1);
+        }
+    });
+}
+
+fn finish(
+    ui: &AppWindow,
+    folder: &Path,
+    failure: &Rc<RefCell<Option<String>>>,
+    windows_preflight: bool,
+) {
+    let report = serde_json::json!({
+        "result": "passed", "platform": std::env::consts::OS,
+        "method": "native Slint events and real helper preflight with a deliberately missing package; no network or installer execution",
+        "windows_helper_failure_checked": windows_preflight,
+        "checks": ["long release notes scroll", "keyboard focus", "left-aligned progress", "close preserves feedback",
+            "install later retains ready notice", "manual check preserves downloaded state",
+            "install feedback guard and cancellation", "helper preflight failure preserves the editor"],
+        "images": ["update-long.png", "update-scrolled.png", "update-downloading.png", "update-ready.png", "update-later.png", "update-guard.png", "update-install-error.png"]
+    });
+    let result = serde_json::to_vec_pretty(&report)
+        .map_err(|e| e.to_string())
+        .and_then(|bytes| {
+            std::fs::write(folder.join("update-report.json"), bytes).map_err(|e| e.to_string())
+        });
+    if let Err(error) = result {
+        fail(ui, folder, failure, error);
+    } else {
+        let _ = ui.hide();
+    }
 }

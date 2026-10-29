@@ -15,6 +15,7 @@ use std::{
 };
 
 const ENDPOINT_FILE: &str = "editor-control.json";
+pub const RESIDENT_ENDPOINT: &str = "resident-control.json";
 const TOKEN_BYTES: usize = 32;
 const TOKEN_HEX: usize = TOKEN_BYTES * 2;
 
@@ -44,6 +45,8 @@ impl Decision {
 
 #[derive(Debug, Serialize, Deserialize, PartialEq, Eq)]
 struct Endpoint {
+    #[serde(default)]
+    pid: u32,
     port: u16,
     token: String,
 }
@@ -78,14 +81,26 @@ impl Server {
         directory: &Path,
         notify: impl Fn(mpsc::Sender<Decision>) -> Result<(), ()> + Send + 'static,
     ) -> Result<Self, String> {
+        Self::start_named(directory, ENDPOINT_FILE, notify)
+    }
+    /// Caller must hold the corresponding process lock before publishing an endpoint.
+    pub fn start_named(
+        directory: &Path,
+        name: &str,
+        notify: impl Fn(mpsc::Sender<Decision>) -> Result<(), ()> + Send + 'static,
+    ) -> Result<Self, String> {
         let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0))
             .map_err(|e| format!("无法建立本机进程通信：{e}"))?;
         let port = listener.local_addr().map_err(|e| e.to_string())?.port();
         let mut random = [0; TOKEN_BYTES];
         getrandom::fill(&mut random).map_err(|e| e.to_string())?;
         let token = random.iter().map(|b| format!("{b:02x}")).collect();
-        let endpoint = Endpoint { port, token };
-        let path = directory.join(ENDPOINT_FILE);
+        let endpoint = Endpoint {
+            pid: std::process::id(),
+            port,
+            token,
+        };
+        let path = directory.join(name);
         if let Ok(meta) = fs::symlink_metadata(&path) {
             if !meta.file_type().is_file() {
                 return Err("编辑器通信文件不是普通文件".into());
@@ -178,11 +193,30 @@ impl Drop for Server {
     }
 }
 
+pub fn resident_pid(directory: &Path) -> Result<u32, String> {
+    let pid = read_endpoint(&directory.join(RESIDENT_ENDPOINT))?.pid;
+    if pid == 0 {
+        return Err("托盘不支持进程退出确认，请重启应用后重试".into());
+    }
+    Ok(pid)
+}
+
 /// Waits for the user's decision without blocking the resident's UI thread.
 pub fn request(directory: &Path) -> Result<Decision, String> {
-    let endpoint = read_endpoint(&directory.join(ENDPOINT_FILE))?;
+    request_named(directory, ENDPOINT_FILE, None)
+}
+
+pub fn request_named(
+    directory: &Path,
+    name: &str,
+    timeout: Option<Duration>,
+) -> Result<Decision, String> {
+    let endpoint = read_endpoint(&directory.join(name))?;
     let address = SocketAddrV4::new(Ipv4Addr::LOCALHOST, endpoint.port);
     let mut stream = TcpStream::connect_timeout(&address.into(), Duration::from_secs(1))
+        .map_err(|e| e.to_string())?;
+    stream
+        .set_read_timeout(timeout)
         .map_err(|e| e.to_string())?;
     stream
         .set_write_timeout(Some(Duration::from_secs(1)))
@@ -300,6 +334,38 @@ mod tests {
         drop(server);
         assert!(client.join().unwrap().is_err());
         drop(reply);
+    }
+    #[test]
+    fn resident_endpoint_is_separate_authenticated_and_has_a_bounded_response() {
+        let temp = Temp::new();
+        let editor = Server::start(&temp.0, |reply| {
+            reply.send(Decision::Cancelled).map_err(|_| ())
+        })
+        .unwrap();
+        let resident = Server::start_named(&temp.0, RESIDENT_ENDPOINT, |reply| {
+            reply.send(Decision::Closing).map_err(|_| ())
+        })
+        .unwrap();
+        assert_eq!(resident_pid(&temp.0).unwrap(), std::process::id());
+        assert_eq!(request(&temp.0).unwrap(), Decision::Cancelled);
+        assert_eq!(
+            request_named(&temp.0, RESIDENT_ENDPOINT, Some(Duration::from_secs(1))).unwrap(),
+            Decision::Closing
+        );
+        drop(resident);
+        assert!(temp.0.join(ENDPOINT_FILE).exists());
+        let (tx, rx) = mpsc::channel();
+        let resident = Server::start_named(&temp.0, RESIDENT_ENDPOINT, move |reply| {
+            tx.send(reply).map_err(|_| ())
+        })
+        .unwrap();
+        assert!(
+            request_named(&temp.0, RESIDENT_ENDPOINT, Some(Duration::from_millis(100))).is_err()
+        );
+        let pending = rx.recv().unwrap();
+        drop(resident);
+        drop(pending);
+        drop(editor);
     }
     #[test]
     fn editor_lock_is_exclusive() {

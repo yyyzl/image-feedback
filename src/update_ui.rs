@@ -1,7 +1,7 @@
 //! Slint integration for background update checks and explicit downloads.
-//! An update never exits the editor, launches a package, or modifies feedback.
+//! Downloads never install automatically. Explicit installation goes through the editor's feedback guard.
 use crate::AppWindow;
-use image_feedback_slint::update::{self, Cache, DownloadEvent, Release, Target};
+use image_feedback_slint::update::{self, Cache, DownloadEvent, Release, Target, VerifiedDownload};
 use slint::ComponentHandle;
 use std::{
     cell::RefCell,
@@ -27,6 +27,8 @@ enum Phase {
     Ready,
     DownloadError,
     Cancelling,
+    Installing,
+    InstallError,
 }
 impl Phase {
     fn code(self) -> i32 {
@@ -41,6 +43,8 @@ impl Phase {
             Self::Ready => 7,
             Self::DownloadError => 8,
             Self::Cancelling => 9,
+            Self::Installing => 10,
+            Self::InstallError => 11,
         }
     }
 }
@@ -59,7 +63,7 @@ enum WorkerEvent {
     },
     DownloadFinished {
         id: u64,
-        result: Result<PathBuf, String>,
+        result: Result<VerifiedDownload, String>,
     },
 }
 struct Controller {
@@ -67,7 +71,7 @@ struct Controller {
     target: Target,
     cache: Cache,
     release: Option<Release>,
-    downloaded: Option<PathBuf>,
+    downloaded: Option<VerifiedDownload>,
     phase: Phase,
     error: String,
     progress: u64,
@@ -97,7 +101,14 @@ impl Controller {
         } else {
             None
         };
-        let phase = if release.is_some() {
+        let ready = use_cache
+            .then(|| update::ReadyUpdate::load(&directory, target, env!("CARGO_PKG_VERSION")))
+            .flatten();
+        let release = ready.as_ref().map(|r| r.release.clone()).or(release);
+        let downloaded = ready.map(|r| r.download);
+        let phase = if downloaded.is_some() {
+            Phase::Ready
+        } else if release.is_some() {
             Phase::Available
         } else {
             Phase::Idle
@@ -107,7 +118,7 @@ impl Controller {
             target,
             cache,
             release,
-            downloaded: None,
+            downloaded,
             phase,
             error: String::new(),
             progress: 0,
@@ -138,6 +149,8 @@ impl Controller {
                     | Phase::Downloading
                     | Phase::Verifying
                     | Phase::Cancelling
+                    | Phase::Installing
+                    | Phase::InstallError
             )
         {
             return;
@@ -248,23 +261,23 @@ impl Controller {
             ),
             Phase::Downloading => (
                 "正在下载更新".into(),
-                "可以转入后台，继续编辑。".into(),
-                "下载期间可继续编辑；关闭编辑器会中断下载。".into(),
+                "关闭此窗口后可继续编辑。".into(),
+                "下载将在后台继续；退出编辑器会中断下载。".into(),
             ),
             Phase::Verifying => (
                 "正在检查更新文件".into(),
                 "正在校验完整性，请稍候。".into(),
-                "校验通过后会显示安装包位置，不会自动运行安装程序。".into(),
+                "校验通过后可选择现在安装或稍后安装，不会自动退出应用。".into(),
             ),
             Phase::Ready => {
                 let details = if cfg!(target_os = "macos") {
-                    "安装包已通过完整性校验，但不能确认发布者身份。先复制需要保留的反馈并退出编辑器及菜单栏，再打开 DMG 手动替换应用；请留意系统安全提示。"
+                    "此版本使用 DMG，尚不支持自动替换。打开后请退出编辑器及菜单栏，将应用拖入 Applications。文件仅通过完整性校验，请留意系统安全提示。"
                 } else {
-                    "安装包已通过完整性校验，但不能确认发布者身份。先复制需要保留的反馈并退出编辑器及托盘，再手动运行安装程序；请留意系统发布者提示。"
+                    "现在安装会关闭编辑器和托盘，并打开安装向导；如有批注会先请你确认。文件已通过完整性校验，但尚无发布者签名，请仅在信任此发行源时继续。"
                 };
                 (
-                    "安装包已准备好".into(),
-                    "由你决定何时安装。".into(),
+                    "更新已准备好".into(),
+                    "现在安装更新吗？".into(),
                     details.into(),
                 )
             }
@@ -272,6 +285,17 @@ impl Controller {
                 "更新下载未完成".into(),
                 "不会自动运行安装程序。".into(),
                 self.error.clone(),
+            ),
+            Phase::InstallError => (
+                "未能开始安装".into(),
+                "应用未退出，当前反馈仍保留。".into(),
+                self.error.clone(),
+            ),
+            Phase::Installing => (
+                "正在准备安装".into(),
+                "正在检查安装包和退出交接。".into(),
+                "检查完成后将安全退出编辑器和托盘，再打开安装向导；检查失败会保留当前编辑内容。"
+                    .into(),
             ),
             Phase::Cancelling => (
                 "正在取消下载".into(),
@@ -286,7 +310,7 @@ impl Controller {
             Phase::Downloading => format!("正在下载更新 {percentage}%"),
             Phase::Verifying => "正在检查更新文件".to_string(),
             Phase::Cancelling => "正在取消下载".to_string(),
-            Phase::Ready => "更新已准备好".to_string(),
+            Phase::Ready | Phase::InstallError => "更新已准备好".to_string(),
             Phase::DownloadError => "更新下载失败".to_string(),
             _ => self
                 .release
@@ -300,7 +324,7 @@ impl Controller {
         self.next_id = self.next_id.wrapping_add(1);
         self.next_id
     }
-    fn start_check(&mut self, ui: &AppWindow, manual: bool) {
+    fn start_check(&mut self, ui: &AppWindow, manual: bool, startup: bool) {
         if let Some(Active::Check {
             manual: active_manual,
             ..
@@ -314,7 +338,12 @@ impl Controller {
             }
             return;
         }
-        if self.active.is_some() || (manual && self.phase == Phase::Ready) {
+        if self.active.is_some()
+            || matches!(
+                self.phase,
+                Phase::Ready | Phase::Installing | Phase::InstallError
+            )
+        {
             if manual {
                 self.render(ui);
                 ui.set_update_visible(true);
@@ -322,6 +351,7 @@ impl Controller {
             return;
         }
         if !manual
+            && !startup
             && (ui.get_update_visible()
                 || ui.get_confirm_visible()
                 || !self.cache.due(update::now_seconds()))
@@ -341,7 +371,11 @@ impl Controller {
         let weak = ui.as_weak();
         std::thread::spawn(move || {
             let result = std::panic::catch_unwind(|| {
-                update::check_coordinated(&directory, env!("CARGO_PKG_VERSION"), target, manual)
+                if startup {
+                    update::check_startup_coordinated(&directory, env!("CARGO_PKG_VERSION"), target)
+                } else {
+                    update::check_coordinated(&directory, env!("CARGO_PKG_VERSION"), target, manual)
+                }
             })
             .unwrap_or_else(|_| Err("更新检查未能完成，请重试".into()));
             send(&sender, &weak, WorkerEvent::Checked { id, result });
@@ -390,10 +424,17 @@ impl Controller {
         });
     }
     fn dismiss(&mut self, ui: &AppWindow) {
+        if self.phase == Phase::Installing {
+            return;
+        }
         ui.set_update_visible(false);
         if matches!(
             self.phase,
-            Phase::Downloading | Phase::Verifying | Phase::Cancelling
+            Phase::Downloading
+                | Phase::Verifying
+                | Phase::Cancelling
+                | Phase::Ready
+                | Phase::InstallError
         ) {
             ui.set_update_notice_visible(true);
         } else {
@@ -417,31 +458,39 @@ impl Controller {
     }
     fn open(&mut self, ui: &AppWindow) {
         if self.phase == Phase::Idle {
-            self.start_check(ui, true);
+            self.start_check(ui, true, false);
             return;
         }
         self.render(ui);
         ui.set_update_visible(true);
         ui.set_update_notice_visible(false);
     }
-    fn primary(&mut self, ui: &AppWindow) {
+    fn primary(&mut self, ui: &AppWindow) -> Option<VerifiedDownload> {
         match self.phase {
             Phase::Available => self.start_download(ui),
-            Phase::CheckError => self.start_check(ui, true),
+            Phase::CheckError => self.start_check(ui, true, false),
             Phase::DownloadError => self.start_download(ui),
-            Phase::Ready => {
-                if let Some(path) = self.downloaded.as_ref()
-                    && let Err(error) = open_parent(path)
+            Phase::Ready | Phase::InstallError => {
+                if cfg!(windows) {
+                    return self.downloaded.clone();
+                }
+                if let Some(package) = self.downloaded.as_ref()
+                    && let Err(error) = open_package(&package.path)
                 {
                     ui.set_update_detail(
-                        format!("无法打开下载目录：{error}。请前往发行页获取安装包。").into(),
+                        format!("无法打开安装包：{error}。可前往发行页重新下载。").into(),
                     );
                 }
             }
             _ => {}
         }
+        None
     }
     fn secondary(&mut self, ui: &AppWindow) {
+        if self.phase == Phase::InstallError {
+            self.start_download(ui);
+            return;
+        }
         if matches!(self.phase, Phase::Downloading | Phase::Verifying) {
             if let Some(Active::Download { cancel, .. }) = &self.active {
                 cancel.store(true, Ordering::Relaxed);
@@ -535,8 +584,8 @@ impl Controller {
                 self.active = None;
                 if cancelled {
                     if let Ok(path) = result {
-                        let _ = std::fs::remove_file(&path);
-                        if let Some(parent) = path.parent() {
+                        let _ = std::fs::remove_file(&path.path);
+                        if let Some(parent) = path.path.parent() {
                             let _ = std::fs::remove_dir(parent);
                         }
                     }
@@ -576,8 +625,7 @@ fn open_release_page(ui: &AppWindow) {
         ui.set_update_subtitle("无法打开浏览器，请手动访问 GitHub 发行页。".into());
     }
 }
-fn open_parent(path: &Path) -> Result<(), String> {
-    let folder = path.parent().ok_or("下载位置无效")?;
+fn open_package(path: &Path) -> Result<(), String> {
     if !path.is_file() {
         return Err("安装包已被移动或删除".into());
     }
@@ -588,7 +636,7 @@ fn open_parent(path: &Path) -> Result<(), String> {
     #[cfg(not(any(windows, target_os = "macos")))]
     let mut command = std::process::Command::new("xdg-open");
     command
-        .arg(folder)
+        .arg(path)
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
@@ -597,18 +645,83 @@ fn open_parent(path: &Path) -> Result<(), String> {
     Ok(())
 }
 
-/// Wire callbacks and return a timer that must be held while the editor runs.
+pub struct UpdateHandle {
+    timer: Rc<slint::Timer>,
+    state: Rc<RefCell<Controller>>,
+    smoke: bool,
+}
+impl UpdateHandle {
+    pub fn stop(&self) {
+        self.timer.stop();
+    }
+    /// No network or executable fixture: only used by the explicit native smoke mode.
+    pub fn seed_smoke_ready(&self, ui: &AppWindow, missing_path: PathBuf) {
+        assert!(self.smoke, "cannot inject updates into a normal session");
+        let mut state = self.state.borrow_mut();
+        state.phase = Phase::Ready;
+        state.downloaded = Some(VerifiedDownload {
+            path: missing_path,
+            sha256: "0".repeat(64),
+            size: 1,
+        });
+        state.render(ui);
+        ui.set_update_visible(true);
+    }
+}
+
+/// Wire callbacks and return a handle that must be held while the editor runs.
 /// Smoke scenarios can disable automatic network access without changing the UI.
-pub fn install(ui: &AppWindow, directory: PathBuf, automatic: bool) -> Rc<slint::Timer> {
+pub fn install(
+    ui: &AppWindow,
+    directory: PathBuf,
+    automatic: bool,
+    on_install: impl Fn(VerifiedDownload) + 'static,
+) -> Rc<UpdateHandle> {
+    ui.set_update_install_label(
+        if cfg!(windows) {
+            "现在安装"
+        } else {
+            "打开安装包"
+        }
+        .into(),
+    );
     let (sender, receiver) = mpsc::channel();
     let state = Rc::new(RefCell::new(Controller::new(directory, sender, automatic)));
     {
+        let state = state.clone();
+        let weak = ui.as_weak();
+        ui.on_update_install_started(move || {
+            if let Some(ui) = weak.upgrade() {
+                let mut controller = state.borrow_mut();
+                controller.phase = Phase::Installing;
+                controller.render(&ui);
+                ui.set_update_visible(true);
+            }
+        });
+    }
+    {
+        let state = state.clone();
+        let weak = ui.as_weak();
+        ui.on_update_install_failed(move |error| {
+            if let Some(ui) = weak.upgrade() {
+                let mut controller = state.borrow_mut();
+                controller.phase = Phase::InstallError;
+                controller.error = error.to_string();
+                controller.render(&ui);
+                ui.set_update_notice_visible(true);
+                ui.set_update_visible(true);
+            }
+        });
+    }
+    {
         let controller = state.borrow();
         controller.render(ui);
-        if let Some(release) = &controller.release
-            && controller
-                .cache
-                .should_notify(&release.tag, update::now_seconds())
+        if controller.phase == Phase::Ready
+            || controller.release.as_ref().is_some_and(|release| {
+                controller
+                    .cache
+                    .should_notify(&release.tag, update::now_seconds())
+            })
         {
             ui.set_update_notice_visible(true);
         }
@@ -628,7 +741,7 @@ pub fn install(ui: &AppWindow, directory: PathBuf, automatic: bool) -> Rc<slint:
         let state = state.clone();
         ui.on_update_check(move || {
             if let Some(ui) = weak.upgrade() {
-                state.borrow_mut().start_check(&ui, true);
+                state.borrow_mut().start_check(&ui, true, false);
             }
         });
     }
@@ -664,7 +777,10 @@ pub fn install(ui: &AppWindow, directory: PathBuf, automatic: bool) -> Rc<slint:
         let state = state.clone();
         ui.on_update_primary(move || {
             if let Some(ui) = weak.upgrade() {
-                state.borrow_mut().primary(&ui);
+                let package = state.borrow_mut().primary(&ui);
+                if let Some(package) = package {
+                    on_install(package);
+                }
             }
         });
     }
@@ -690,26 +806,31 @@ pub fn install(ui: &AppWindow, directory: PathBuf, automatic: bool) -> Rc<slint:
         {
             let weak = ui.as_weak();
             let state = state.clone();
-            slint::Timer::single_shot(Duration::from_secs(8), move || {
+            slint::Timer::single_shot(Duration::from_secs(1), move || {
                 if let Some(ui) = weak.upgrade() {
                     let mut state = state.borrow_mut();
                     state.poll_cache(&ui);
-                    state.start_check(&ui, false);
+                    state.start_check(&ui, false, true);
                 }
             });
         }
         let weak = ui.as_weak();
+        let periodic_state = state.clone();
         timer.start(
             slint::TimerMode::Repeated,
             Duration::from_secs(30),
             move || {
                 if let Some(ui) = weak.upgrade() {
-                    let mut state = state.borrow_mut();
+                    let mut state = periodic_state.borrow_mut();
                     state.poll_cache(&ui);
-                    state.start_check(&ui, false);
+                    state.start_check(&ui, false, false);
                 }
             },
         );
     }
-    timer
+    Rc::new(UpdateHandle {
+        timer,
+        state,
+        smoke: !automatic,
+    })
 }

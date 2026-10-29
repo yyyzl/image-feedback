@@ -1,6 +1,6 @@
 [package]
 name = "image-feedback-slint"
-version = "0.2.3"
+version = "0.2.4"
 edition = "2024"
 rust-version = "1.92"
 description = "A lightweight, local-first desktop image feedback editor built with Rust and Slint"

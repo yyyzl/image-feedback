@@ -543,11 +543,31 @@ pub fn check_coordinated(
         check(current, target)
     })
 }
+/// Startup always checks, except for a result just obtained by the other process.
+pub fn check_startup_coordinated(
+    directory: &Path,
+    current: &str,
+    target: Target,
+) -> Result<Option<Release>, String> {
+    check_coordinated_policy(directory, current, target, true, true, || {
+        check(current, target)
+    })
+}
 fn check_coordinated_with(
     directory: &Path,
     current: &str,
     target: Target,
     manual: bool,
+    run: impl FnOnce() -> Result<Option<Release>, String>,
+) -> Result<Option<Release>, String> {
+    check_coordinated_policy(directory, current, target, manual, false, run)
+}
+fn check_coordinated_policy(
+    directory: &Path,
+    current: &str,
+    target: Target,
+    manual: bool,
+    startup: bool,
     run: impl FnOnce() -> Result<Option<Release>, String>,
 ) -> Result<Option<Release>, String> {
     let started = now_seconds();
@@ -565,7 +585,12 @@ fn check_coordinated_with(
         std::thread::sleep(Duration::from_millis(200));
     }
     let cache = Cache::load(directory, target, current);
-    if (!manual && !cache.due(now_seconds()))
+    let just_checked = startup
+        && cache.last_attempt > 0
+        && now_seconds() >= cache.last_attempt
+        && now_seconds() - cache.last_attempt < 60;
+    if just_checked
+        || (!manual && !cache.due(now_seconds()))
         || (manual && waited && cache.last_attempt >= started && cache.last_attempt_succeeded)
     {
         return if cache.last_attempt_succeeded {
@@ -594,14 +619,24 @@ pub fn start_resident_checks(directory: PathBuf) -> Arc<AtomicBool> {
     let stop = Arc::new(AtomicBool::new(false));
     let worker_stop = stop.clone();
     std::thread::spawn(move || {
-        std::thread::sleep(Duration::from_secs(8));
+        std::thread::sleep(Duration::from_secs(1));
+        let mut startup = true;
         while !worker_stop.load(Ordering::Relaxed) {
-            let _ = check_coordinated(
-                &directory,
-                env!("CARGO_PKG_VERSION"),
-                Target::current(),
-                false,
-            );
+            if startup {
+                let _ = check_startup_coordinated(
+                    &directory,
+                    env!("CARGO_PKG_VERSION"),
+                    Target::current(),
+                );
+                startup = false;
+            } else {
+                let _ = check_coordinated(
+                    &directory,
+                    env!("CARGO_PKG_VERSION"),
+                    Target::current(),
+                    false,
+                );
+            }
             std::thread::sleep(Duration::from_secs(15 * 60));
         }
     });
@@ -728,15 +763,75 @@ fn save_stream<R: Read>(
     fs::rename(&part, &final_path).map_err(|_| "无法完成下载文件保存".to_string())?;
     Ok(final_path)
 }
-/// Download a matching official asset only after explicit user action. The caller
-/// must not execute it automatically: same-release SHA-256 is not a signature.
+/// A successfully downloaded package, pinned to the digest checked during download.
+/// This proves integrity, not publisher identity. Execution requires explicit consent.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct VerifiedDownload {
+    pub path: PathBuf,
+    pub sha256: String,
+    pub size: u64,
+}
+
+/// Retain “install later” across application restarts. Revalidate both metadata
+/// and the file location here; the helper rehashes the file before execution.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ReadyUpdate {
+    pub release: Release,
+    pub download: VerifiedDownload,
+}
+impl ReadyUpdate {
+    pub fn load(root: &Path, target: Target, current: &str) -> Option<Self> {
+        let file = File::open(root.join("ready-update.json")).ok()?;
+        let mut bytes = Vec::new();
+        file.take(256 * 1024).read_to_end(&mut bytes).ok()?;
+        let ready: Self = serde_json::from_slice(&bytes).ok()?;
+        let package = ready.release.package.as_ref()?;
+        let path = ready.download.path.canonicalize().ok()?;
+        let updates = root.join("updates").canonicalize().ok()?;
+        if !ready.release.valid(target)
+            || !is_newer(&ready.release.tag, current).ok()?
+            || path.parent().and_then(Path::parent) != Some(updates.as_path())
+            || path.file_name()?.to_str()? != package.name
+            || ready.download.size != package.size
+            || fs::metadata(&path).ok()?.len() != package.size
+            || ready.download.sha256.len() != 64
+            || !ready.download.sha256.bytes().all(|c| c.is_ascii_hexdigit())
+        {
+            return None;
+        }
+        Some(ready)
+    }
+    pub fn save(&self, root: &Path) -> Result<(), String> {
+        let mut random = [0u8; 8];
+        getrandom::fill(&mut random).map_err(|e| e.to_string())?;
+        let temporary = root.join(format!("ready-update-{}.tmp", hex(&random)));
+        let result = (|| {
+            let mut file = OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&temporary)
+                .map_err(|e| e.to_string())?;
+            serde_json::to_writer(&mut file, self).map_err(|e| e.to_string())?;
+            file.sync_all().map_err(|e| e.to_string())?;
+            drop(file);
+            fs::rename(&temporary, root.join("ready-update.json")).map_err(|e| e.to_string())
+        })();
+        if result.is_err() {
+            let _ = fs::remove_file(temporary);
+        }
+        result
+    }
+}
+
+/// Download a matching official asset only after explicit user action.
+/// Never install without a separate user confirmation: SHA-256 is not a signature.
 pub fn download(
     release: &Release,
     target: Target,
     root: &Path,
     cancel: Arc<AtomicBool>,
     notify: impl FnMut(DownloadEvent),
-) -> Result<PathBuf, String> {
+) -> Result<VerifiedDownload, String> {
     if !release.valid(target) {
         return Err("发行信息无效，请前往官方发行页".into());
     }
@@ -784,8 +879,18 @@ pub fn download(
         &cancel,
         notify,
     )?;
+    let download = VerifiedDownload {
+        path,
+        sha256: expected,
+        size: package.size,
+    };
+    ReadyUpdate {
+        release: release.clone(),
+        download: download.clone(),
+    }
+    .save(root)?;
     directory.keep = true;
-    Ok(path)
+    Ok(download)
 }
 
 #[cfg(test)]
@@ -972,6 +1077,92 @@ mod tests {
         let _ = fs::remove_dir_all(root);
     }
     #[test]
+    fn startup_coalesces_recent_checks_but_does_not_wait_for_the_daily_interval() {
+        let root = std::env::temp_dir().join(format!(
+            "startup-update-test-{}-{}",
+            std::process::id(),
+            now_seconds()
+        ));
+        fs::create_dir_all(&root).unwrap();
+        let mut cache = Cache {
+            last_attempt: now_seconds(),
+            last_attempt_succeeded: true,
+            ..Cache::default()
+        };
+        cache.save(&root).unwrap();
+        check_coordinated_policy(&root, "0.2.3", Target::WindowsX64, true, true, || {
+            panic!("startup must share a just-finished check")
+        })
+        .unwrap();
+        cache.last_attempt -= 61;
+        cache.save(&root).unwrap();
+        let mut ran = false;
+        check_coordinated_policy(&root, "0.2.3", Target::WindowsX64, true, true, || {
+            ran = true;
+            Ok(None)
+        })
+        .unwrap();
+        assert!(ran);
+        cache.last_attempt = now_seconds();
+        cache.last_attempt_succeeded = false;
+        cache.save(&root).unwrap();
+        assert!(
+            check_coordinated_policy(&root, "0.2.3", Target::WindowsX64, true, true, || panic!(
+                "startup must not duplicate a just-failed check"
+            ))
+            .is_err()
+        );
+        let _ = fs::remove_dir_all(root);
+    }
+    #[test]
+    fn ready_update_survives_restart_but_rejects_stale_missing_and_wrong_platform_files() {
+        let root = std::env::temp_dir().join(format!(
+            "ready-update-test-{}-{}",
+            std::process::id(),
+            now_seconds()
+        ));
+        let directory = unique_download_directory(&root).unwrap();
+        let release = build_release(
+            release("v0.3.0", "notes"),
+            vec![],
+            true,
+            "0.2.3",
+            Target::WindowsX64,
+        )
+        .unwrap();
+        let path = directory.path.join(&release.package.as_ref().unwrap().name);
+        fs::write(&path, b"abc").unwrap();
+        let ready = ReadyUpdate {
+            release,
+            download: VerifiedDownload {
+                path: path.clone(),
+                size: 3,
+                sha256: "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad".into(),
+            },
+        };
+        ready.save(&root).unwrap();
+        // Replacing an existing receipt must be atomic and supported on Windows too.
+        ready.save(&root).unwrap();
+        assert_eq!(
+            ReadyUpdate::load(&root, Target::WindowsX64, "0.2.3")
+                .unwrap()
+                .download,
+            ready.download
+        );
+        assert!(ReadyUpdate::load(&root, Target::WindowsX64, "0.3.0").is_none());
+        assert!(ReadyUpdate::load(&root, Target::MacUniversal, "0.2.3").is_none());
+        let mut invalid = ready.clone();
+        invalid.download.path = root.join("outside.exe");
+        fs::write(&invalid.download.path, b"abc").unwrap();
+        invalid.save(&root).unwrap();
+        assert!(ReadyUpdate::load(&root, Target::WindowsX64, "0.2.3").is_none());
+        ready.save(&root).unwrap();
+        fs::remove_file(path).unwrap();
+        assert!(ReadyUpdate::load(&root, Target::WindowsX64, "0.2.3").is_none());
+        drop(directory);
+        let _ = fs::remove_dir_all(root);
+    }
+    #[test]
     fn failed_checks_back_off_and_dismissal_expires() {
         let cache = Cache {
             last_attempt: 100,
@@ -1067,7 +1258,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(
-            fs::metadata(path).unwrap().len(),
+            fs::metadata(path.path).unwrap().len(),
             found.package.unwrap().size
         );
     }

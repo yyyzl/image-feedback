@@ -21,6 +21,7 @@ enum Event {
     Open,
     Menu(MenuId),
     QuitResult(QuitResult),
+    QuitRequested(std::sync::mpsc::Sender<super::quit_ipc::Decision>),
 }
 #[derive(Debug)]
 enum QuitOutcome {
@@ -49,6 +50,7 @@ struct Resident {
     hint: Option<MenuItem>,
     proxy: EventLoopProxy<Event>,
     quitting: bool,
+    quit_reply: Option<std::sync::mpsc::Sender<super::quit_ipc::Decision>>,
     exit_lock: Option<File>,
     child: Option<Child>,
     open_initially: bool,
@@ -123,6 +125,14 @@ impl Resident {
     fn quit_result(&mut self, event_loop: &ActiveEventLoop, result: QuitResult) {
         let QuitResult { outcome, child } = result;
         self.child = child;
+        if let Some(reply) = self.quit_reply.take() {
+            let decision = match &outcome {
+                QuitOutcome::Closed(_) => super::quit_ipc::Decision::Closing,
+                QuitOutcome::Cancelled => super::quit_ipc::Decision::Cancelled,
+                _ => super::quit_ipc::Decision::Busy,
+            };
+            let _ = reply.send(decision);
+        }
         let mut repeat = false;
         if let Some(smoke) = self.quit_smoke.as_mut() {
             let result = match &outcome {
@@ -316,6 +326,14 @@ impl ApplicationHandler<Event> for Resident {
                 }
             }
             Event::QuitResult(result) => self.quit_result(event_loop, result),
+            Event::QuitRequested(reply) => {
+                if self.quitting {
+                    let _ = reply.send(super::quit_ipc::Decision::Busy);
+                } else {
+                    self.quit_reply = Some(reply);
+                    self.quit();
+                }
+            }
         }
     }
     fn window_event(&mut self, _: &ActiveEventLoop, _: WindowId, _: WindowEvent) {}
@@ -409,13 +427,24 @@ pub fn run(open_initially: bool) -> Result<(), Box<dyn Error>> {
             let _ = proxy.send_event(Event::Open);
         }
     }));
-    let update_stop = if smoke_output.is_none() && quit_smoke.is_none() {
+    let offline_test = cfg!(debug_assertions) && args.iter().any(|a| a == "--update-offline-test");
+    let update_stop = if smoke_output.is_none() && quit_smoke.is_none() && !offline_test {
         Some(image_feedback_slint::update::start_resident_checks(
             super::app_dir(),
         ))
     } else {
         None
     };
+    let proxy = events.create_proxy();
+    let _control = super::quit_ipc::Server::start_named(
+        &super::app_dir(),
+        super::quit_ipc::RESIDENT_ENDPOINT,
+        move |reply| {
+            proxy
+                .send_event(Event::QuitRequested(reply))
+                .map_err(|_| ())
+        },
+    )?;
     let mut app = Resident {
         tray: None,
         open: None,
@@ -424,6 +453,7 @@ pub fn run(open_initially: bool) -> Result<(), Box<dyn Error>> {
         hint: None,
         proxy: events.create_proxy(),
         quitting: false,
+        quit_reply: None,
         exit_lock: None,
         child: None,
         open_initially,

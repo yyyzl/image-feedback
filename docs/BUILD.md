@@ -33,6 +33,18 @@ pwsh -File scripts/verify-windows-install.ps1 -Installer dist/windows/ImageFeedb
 
 验证脚本检测到已有正式安装时会停止，不覆盖用户安装。它只结束自己启动的、没有编辑器子进程的空闲测试托盘，不终止用户编辑窗口。安装器本身不使用强制进程结束。当前修复测试不是跨版本升级测试；所有升级必须保留[安装器AppId](<../packaging/windows/ImageFeedback.iss>)。
 
+## Windows 更新交接回归（不安装任何软件）
+
+```powershell
+cargo build --locked
+python scripts/test-update-handoff.py
+cargo run -- --update-smoke artifacts/update-install-smoke
+```
+
+进程回归使用隔离的 `LOCALAPPDATA` 和仅 debug 构建支持的测试互斥量，启动真实编辑器、托盘和独立助手。安装器替身由本机 `rustc` 编译，只写一个标记文件，不修改应用或注册表。检查校验失败、未提交交接、等待编辑器退出、托盘正常退出，以及两个进程真正退出后才运行替身。脚本只可能清理自己启动的进程，不关闭已有用户窗口。
+
+报告分别写入 `artifacts/update-handoff/report.json` 和 `artifacts/update-install-smoke/update-report.json`。这些测试不等于真实 Inno 跨版本升级、SmartScreen 或签名信任验收；发布前仍需在独立环境完成真实安装器验收。实现与恢复边界见 [更新交接说明](UPDATE.md)。
+
 ## macOS Universal DMG
 
 在真正的Mac上运行；Windows不能替代macOS SDK、签名和磁盘镜像工具：
@@ -61,7 +73,7 @@ bash scripts/verify-macos.sh dist/macos/ImageFeedback-0.2.1-macos-universal-adho
 
 [CI](<../.github/workflows/build.yml>)运行Windows、Apple Silicon和Intel验证。标签发行只在所需job成功后发布安装器、Universal DMG及SHA-256；源码、工具和测试数据不混入用户图片。
 
-安装后的窗口回归包含 `smoke-test`、`delivery-smoke`、`dialog-smoke`、`ui-smoke` 和 `update-smoke`。更新窗口场景使用模拟发行说明、不访问网络，检查长说明滚动与键盘操作、关闭更新窗口及取消退出时的批注保护；不运行安装包。其他 UI 场景检查批注收起／展开、失败草稿恢复、键盘编辑及 1000 条批注和最小窗口；行为与证据边界见 [UI 对齐说明](<UI-WEB-ALIGNMENT.md>)。
+安装后的窗口回归包含 `smoke-test`、`delivery-smoke`、`dialog-smoke`、`ui-smoke` 和 `update-smoke`。更新窗口场景使用模拟发行说明、不访问网络，检查长说明滚动与键盘操作、进度条左对齐、稍后安装入口，以及安装时的批注保护和取消。Windows 还启动真实助手，用缺失的安装包验证准备失败后编辑内容仍保留；不运行安装包。其他 UI 场景检查批注收起／展开、失败草稿恢复、键盘编辑及 1000 条批注和最小窗口；行为与证据边界见 [UI 对齐说明](<UI-WEB-ALIGNMENT.md>)。
 
 窗口回归使用真实Slint窗口及场景事件、隔离剪贴板，不是操作系统鼠标/UIA E2E。图块变换的场景回归包括新选区直接变换、双旋转入口、四角、缩放旋转后拖动、画布平移、边缘手柄、撤销和参考图。Windows 另可使用 `cargo build --locked` 后执行 `pwsh -File scripts/verify-transform-input.ps1`，以隔离数据目录和真实操作系统鼠标／键盘事件验证主要交互；该脚本会置前测试窗口并移动鼠标。详细边界见 [图块变换说明](<TRANSFORM.md>)。场景开始前按加载、文件工作与分析状态等待就绪，附加等待上限30秒；超时保留状态和窗口截图，不跳过失败场景。macOS检查真实decoration配置，并调用AppKit `terminate:` 验证退出保护；不把Slint内容截图称为原生traffic-light截图。真实IME、触控板、多屏、Gatekeeper、干净Windows虚拟机及最低macOS版本仍需专项用户实机验收。
 
